@@ -1,29 +1,31 @@
-# Build frontend
+# Stage 1: Build frontend
 FROM node:20-alpine AS frontend
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
-RUN npm install
+RUN npm install --legacy-peer-deps
 COPY web/ ./
 RUN npm run build
 
-# Python backend
+# Stage 2: Python backend
 FROM python:3.12-slim
 WORKDIR /app
 
-# Install dependencies
+# Install build tools for any compiled deps
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -e .
 
 # Copy backend code
 COPY rnascope/ ./rnascope/
 
-# Copy built frontend into static dir
+# Copy built frontend
 COPY --from=frontend /app/web/dist ./static
 
 # Create uploads dir
 RUN mkdir -p /app/uploads
 
-# Serve frontend from FastAPI
 ENV RNASCOPE_UPLOAD_DIR=/app/uploads
 ENV PORT=10000
 

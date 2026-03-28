@@ -868,19 +868,19 @@ async def health():
 # Serve frontend static files (production: built React app)
 # ---------------------------------------------------------------------------
 
-import os
 from pathlib import Path as _Path
 
 _static_dir = _Path(__file__).parent.parent / "static"
 if _static_dir.is_dir():
     from fastapi.responses import FileResponse
 
-    # Serve index.html for all non-API routes (SPA client-side routing)
     @api_app.get("/{path:path}")
     async def serve_spa(path: str):
+        # Skip API and WS routes
+        if path.startswith("api/") or path.startswith("ws/"):
+            raise HTTPException(status_code=404)
         file_path = _static_dir / path
         if file_path.is_file():
             return FileResponse(file_path)
+        # SPA fallback: all other routes serve index.html
         return FileResponse(_static_dir / "index.html")
-
-    api_app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")

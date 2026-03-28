@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     # Anthropic
-    anthropic_api_key: str
+    anthropic_api_key: str = ""
     orchestrator_model: str = "claude-sonnet-4-6-20250514"
     interpretation_model: str = "claude-sonnet-4-6-20250514"
     chat_model: str = "claude-sonnet-4-6-20250514"
