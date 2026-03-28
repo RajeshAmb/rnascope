@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: rnascope
+    runtime: docker
+    plan: starter
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        value: us-east-1
+      - key: REDIS_URL
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: NCBI_API_KEY
+        sync: false
+      - key: S3_BUCKET_RAW
+        value: rnascope-raw-data
+      - key: S3_BUCKET_RESULTS
+        value: rnascope-results
+      - key: S3_BUCKET_REPORTS
+        value: rnascope-reports
+    healthCheckPath: /health

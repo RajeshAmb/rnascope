@@ -862,3 +862,25 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
 @api_app.get("/health")
 async def health():
     return {"status": "ok", "service": "rnascope"}
+
+
+# ---------------------------------------------------------------------------
+# Serve frontend static files (production: built React app)
+# ---------------------------------------------------------------------------
+
+import os
+from pathlib import Path as _Path
+
+_static_dir = _Path(__file__).parent.parent / "static"
+if _static_dir.is_dir():
+    from fastapi.responses import FileResponse
+
+    # Serve index.html for all non-API routes (SPA client-side routing)
+    @api_app.get("/{path:path}")
+    async def serve_spa(path: str):
+        file_path = _static_dir / path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(_static_dir / "index.html")
+
+    api_app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")
