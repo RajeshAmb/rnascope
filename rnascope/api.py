@@ -868,19 +868,36 @@ async def health():
 # Serve frontend static files (production: built React app)
 # ---------------------------------------------------------------------------
 
+import os as _os
 from pathlib import Path as _Path
+from fastapi.responses import FileResponse
 
-_static_dir = _Path(__file__).parent.parent / "static"
-if _static_dir.is_dir():
-    from fastapi.responses import FileResponse
+# Check multiple possible locations for the static dir
+_static_candidates = [
+    _Path("/app/static"),                          # Docker: COPY --from=frontend
+    _Path(__file__).parent.parent / "static",      # Local dev: project root
+    _Path.cwd() / "static",                        # CWD fallback
+]
+_static_dir = None
+for _candidate in _static_candidates:
+    if _candidate.is_dir() and (_candidate / "index.html").is_file():
+        _static_dir = _candidate
+        break
+
+if _static_dir:
+    logger.info("Serving frontend from: %s", _static_dir)
 
     @api_app.get("/{path:path}")
     async def serve_spa(path: str):
-        # Skip API and WS routes
-        if path.startswith("api/") or path.startswith("ws/"):
+        if path.startswith("api/") or path.startswith("ws/") or path == "health":
             raise HTTPException(status_code=404)
         file_path = _static_dir / path
         if file_path.is_file():
             return FileResponse(file_path)
-        # SPA fallback: all other routes serve index.html
         return FileResponse(_static_dir / "index.html")
+else:
+    logger.warning("No static frontend found. Serving API only.")
+
+    @api_app.get("/")
+    async def root():
+        return {"status": "ok", "service": "rnascope", "frontend": "not built", "docs": "/docs"}
