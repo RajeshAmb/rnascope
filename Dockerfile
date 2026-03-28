@@ -10,15 +10,12 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# Install build tools for any compiled deps
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
-
-# Install Python deps
+# Copy source code FIRST (hatchling needs it to resolve the package)
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir -e .
-
-# Copy backend code
 COPY rnascope/ ./rnascope/
+
+# Install (non-editable — production build)
+RUN pip install --no-cache-dir .
 
 # Copy built frontend
 COPY --from=frontend /app/web/dist ./static
