@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Node
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Uploads
+uploads/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
