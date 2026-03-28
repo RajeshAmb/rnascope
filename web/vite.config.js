@@ -3,6 +3,14 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      'plotly.js': 'plotly.js-dist-min',
+    },
+  },
+  build: {
+    chunkSizeWarningLimit: 5000,
+  },
   server: {
     port: 3000,
     proxy: {
