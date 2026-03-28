@@ -1,5 +1,5 @@
 import { forwardRef } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../../PlotlyChart'
 
 const TranscriptPlot = forwardRef(function TranscriptPlot({ data }, ref) {
   if (!data) return null

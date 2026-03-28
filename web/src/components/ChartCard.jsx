@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import { Download, Image, FileSpreadsheet, FileImage, ChevronDown } from 'lucide-react'
-import Plotly from 'plotly.js-dist-min'
+import { Plotly } from '../PlotlyChart'
 
 /**
  * ChartCard — wraps any chart or table with a title bar and download dropdown.

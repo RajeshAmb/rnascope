@@ -1,5 +1,5 @@
 import { forwardRef } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../../PlotlyChart'
 import { Network } from 'lucide-react'
 
 const WGCNAPlot = forwardRef(function WGCNAPlot({ data }, ref) {

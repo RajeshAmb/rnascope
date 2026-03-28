@@ -1,5 +1,5 @@
 import { forwardRef } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../../PlotlyChart'
 
 const HeatmapPlot = forwardRef(function HeatmapPlot({ data }, ref) {
   if (!data || !data.matrix) return null

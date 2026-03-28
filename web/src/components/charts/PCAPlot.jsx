@@ -1,5 +1,5 @@
 import { forwardRef } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../../PlotlyChart'
 
 const COLORS = { Treatment: '#ef4444', Control: '#3b82f6' }
 

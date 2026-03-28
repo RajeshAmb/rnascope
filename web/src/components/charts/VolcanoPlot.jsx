@@ -1,5 +1,5 @@
 import { forwardRef } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../../PlotlyChart'
 
 const VolcanoPlot = forwardRef(function VolcanoPlot({ data }, ref) {
   if (!data || data.length === 0) return null
