@@ -101,6 +101,8 @@ GENOME_REFERENCES: dict[str, dict[str, str]] = {
     "soybean":     {"genome": "Wm82.a4.v1",   "gtf": "Gmax_508",      "org_db": "org.Gm.eg.db",  "kegg": "gmx"},
     "potato":      {"genome": "DM_v6.1",       "gtf": "PGSC_DM_v6.1",  "org_db": "",               "kegg": "stu"},
     "grape":       {"genome": "12X.v2",        "gtf": "VCost.v3",      "org_db": "",               "kegg": "vvi"},
+    "cotton":      {"genome": "UTX-TM1_v2.1", "gtf": "HAU_v1",        "org_db": "",               "kegg": "ghir"},
+    "cotton_arboreum": {"genome": "CRI_v1.0",  "gtf": "CRI_v1.0",     "org_db": "",               "kegg": "garb"},
     # Microbiome / Soil / Food
     "ecoli":       {"genome": "K-12_MG1655",   "gtf": "NCBI_ASM584",   "org_db": "org.EcK12.eg.db", "kegg": "eco"},
     "yeast":       {"genome": "R64-1-1",       "gtf": "Ensembl_110",    "org_db": "org.Sc.sgd.db", "kegg": "sce"},
@@ -122,6 +124,8 @@ class Job(BaseModel):
     condition_b: str = ""
     n_a: int = 0
     n_b: int = 0
+    genotypes: list[str] = Field(default_factory=list)
+    time_points: list[str] = Field(default_factory=list)
     dataset_size_gb: float = 0.0
     s3_input_path: str = ""
     metadata_path: str = ""

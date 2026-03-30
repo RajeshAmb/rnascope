@@ -82,6 +82,8 @@ class JobCreateRequest(BaseModel):
     condition_b: str
     n_a: int
     n_b: int
+    genotypes: list[str] = []
+    time_points: list[str] = []
     tissue_type: str = ""
     disease_context: str = ""
     email: str = ""
@@ -571,6 +573,8 @@ async def create_job(
     condition_b: str = Form(...),
     n_a: int = Form(...),
     n_b: int = Form(...),
+    genotypes: str = Form(""),
+    time_points: str = Form(""),
     tissue_type: str = Form(""),
     disease_context: str = Form(""),
     email: str = Form(""),
@@ -601,6 +605,8 @@ async def create_job(
         "n_a": n_a,
         "n_b": n_b,
         "n_samples": n_a + n_b,
+        "genotypes": [g.strip() for g in genotypes.split(",") if g.strip()] if genotypes else [],
+        "time_points": [t.strip() for t in time_points.split(",") if t.strip()] if time_points else [],
         "tissue_type": tissue_type,
         "disease_context": disease_context,
         "email": email,

@@ -17,6 +17,8 @@ export default function UploadPage() {
     condition_b: '',
     n_a: 3,
     n_b: 3,
+    genotypes: '',
+    time_points: '',
     tissue_type: '',
     disease_context: '',
     email: '',
@@ -213,22 +215,22 @@ export default function UploadPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Condition A (Treatment)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Condition A (Control)</label>
               <input
                 type="text"
                 value={form.condition_a}
                 onChange={(e) => setField('condition_a', e.target.value)}
-                placeholder="e.g. Disease, Treated, KO"
+                placeholder="e.g. Healthy, Untreated, WT"
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Condition B (Control)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Condition B (Treatment)</label>
               <input
                 type="text"
                 value={form.condition_b}
                 onChange={(e) => setField('condition_b', e.target.value)}
-                placeholder="e.g. Healthy, Untreated, WT"
+                placeholder="e.g. Disease, Treated, KO"
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
             </div>
@@ -252,6 +254,29 @@ export default function UploadPage() {
                 onChange={(e) => setField('n_b', parseInt(e.target.value) || 1)}
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Genotypes</label>
+              <input
+                type="text"
+                value={form.genotypes}
+                onChange={(e) => setField('genotypes', e.target.value)}
+                placeholder="e.g. Resistant, Susceptible"
+                className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-400 mt-1">Comma-separated genotype names (optional)</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Time Points</label>
+              <input
+                type="text"
+                value={form.time_points}
+                onChange={(e) => setField('time_points', e.target.value)}
+                placeholder="e.g. 0DPI, 7DPI, 14DPI, 21DPI"
+                className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-400 mt-1">Comma-separated time points (optional)</p>
             </div>
 
             <div className="col-span-2">
