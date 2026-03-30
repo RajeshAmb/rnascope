@@ -202,6 +202,27 @@ _REGISTRY: dict[str, SpeciesConfig] = {
         annotation_dbs=["Ensembl_Plants", "URGI"],
         plantcyc_db="GrapeCyc",
     ),
+    "cotton": SpeciesConfig(
+        key="cotton", name="Gossypium hirsutum", domain="plant",
+        genome="UTX-TM1_v2.1", gtf="HAU_v1",
+        org_db="", kegg_code="ghir",
+        ensembl_dataset="ghirsutum_eg_gene",
+        pathway_dbs=["GO", "KEGG", "MapMan", "PlantCyc"],
+        annotation_dbs=["CottonGen", "Ensembl_Plants", "Phytozome"],
+        mapman_bin="Ghi_UTX_v2.1.txt",
+        plantcyc_db="CottonCyc",
+        phytozome_id="Ghirsutum",
+    ),
+    "cotton_arboreum": SpeciesConfig(
+        key="cotton_arboreum", name="Gossypium arboreum", domain="plant",
+        genome="CRI_v1.0", gtf="CRI_v1.0",
+        org_db="", kegg_code="garb",
+        ensembl_dataset="garboreum_eg_gene",
+        pathway_dbs=["GO", "KEGG", "MapMan", "PlantCyc"],
+        annotation_dbs=["CottonGen", "Ensembl_Plants", "Phytozome"],
+        plantcyc_db="CottonCyc",
+        phytozome_id="Garboreum",
+    ),
 
     # ==================== MICROBE / SOIL / FOOD ====================
     "ecoli": SpeciesConfig(

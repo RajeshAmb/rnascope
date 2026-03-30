@@ -168,6 +168,8 @@ export default function UploadPage() {
                   <option value="soybean">Soybean — Glycine max (Wm82.a4)</option>
                   <option value="potato">Potato — S. tuberosum (DM v6.1)</option>
                   <option value="grape">Grape — Vitis vinifera (12X.v2)</option>
+                  <option value="cotton">Cotton — Gossypium hirsutum (UTX-TM1)</option>
+                  <option value="cotton_arboreum">Cotton — Gossypium arboreum (CRI v1.0)</option>
                 </optgroup>
                 <optgroup label="Microbiome / Soil / Food">
                   <option value="ecoli">E. coli (K-12 MG1655)</option>
