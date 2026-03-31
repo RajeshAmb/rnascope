@@ -43,11 +43,14 @@ UPLOAD_DIR = Path(os.environ.get("RNASCOPE_UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Clean up any leftover uploads from previous deploys
-import shutil as _shutil
-for _old_dir in UPLOAD_DIR.iterdir():
-    if _old_dir.is_dir():
-        _shutil.rmtree(_old_dir, ignore_errors=True)
-        logger.info("Startup cleanup: removed %s", _old_dir.name)
+try:
+    import shutil as _shutil
+    for _old_dir in UPLOAD_DIR.iterdir():
+        if _old_dir.is_dir():
+            _shutil.rmtree(_old_dir, ignore_errors=True)
+            logger.info("Startup cleanup: removed %s", _old_dir.name)
+except Exception as _e:
+    logger.warning("Startup cleanup failed: %s", _e)
 
 
 # ---------------------------------------------------------------------------
