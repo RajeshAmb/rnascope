@@ -2,14 +2,21 @@ import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, X, Loader2, FlaskConical } from 'lucide-react'
-import { initJob, uploadFile, startJob } from '../api'
+import { initJob, uploadFile, uploadFileS3, startJob, getUploadMode } from '../api'
 
 export default function UploadPage() {
   const navigate = useNavigate()
   const [files, setFiles] = useState([])
   const [submitting, setSubmitting] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(null) // { current, total, fileName, pct }
+  const [fileProgress, setFileProgress] = useState({}) // { [fileName]: { pct, status } }
   const [error, setError] = useState(null)
+  const [useS3, setUseS3] = useState(null) // null = not checked yet
+  const MAX_PARALLEL = 3
+
+  // Check if S3 direct upload is available on mount
+  useState(() => {
+    getUploadMode().then((m) => setUseS3(m.s3_enabled)).catch(() => setUseS3(false))
+  })
   const [form, setForm] = useState({
     project_name: '',
     species: 'human',
@@ -49,29 +56,37 @@ export default function UploadPage() {
 
     setSubmitting(true)
     setError(null)
-    setUploadProgress(null)
+    setFileProgress({})
 
     try {
       // Step 1: Create job with metadata only
       const { job_id } = await initJob(form)
 
-      // Step 2: Upload files one at a time (avoids Cloudflare 100MB limit)
-      for (let i = 0; i < files.length; i++) {
-        setUploadProgress({ current: i + 1, total: files.length, fileName: files[i].name, pct: 0 })
-        await uploadFile(job_id, files[i], (pct) => {
-          setUploadProgress((prev) => ({ ...prev, pct: Math.round(pct * 100) }))
-        })
+      // Step 2: Upload files in parallel (MAX_PARALLEL at a time)
+      const uploader = useS3 ? uploadFileS3 : uploadFile
+      const queue = [...files]
+      const uploadNext = async () => {
+        while (queue.length > 0) {
+          const file = queue.shift()
+          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 0, status: 'uploading' } }))
+          await uploader(job_id, file, (pct) => {
+            setFileProgress((prev) => ({ ...prev, [file.name]: { pct: Math.round(pct * 100), status: 'uploading' } }))
+          })
+          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 100, status: 'done' } }))
+        }
       }
 
+      const workers = Array.from({ length: Math.min(MAX_PARALLEL, files.length) }, () => uploadNext())
+      await Promise.all(workers)
+
       // Step 3: Start the pipeline
-      setUploadProgress(null)
       await startJob(job_id)
       navigate(`/results/${job_id}`)
     } catch (err) {
       setError(err.message)
     } finally {
       setSubmitting(false)
-      setUploadProgress(null)
+      setFileProgress({})
     }
   }
 
@@ -323,17 +338,27 @@ export default function UploadPage() {
           </div>
         )}
 
-        {uploadProgress && (
-          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
-            <div className="flex items-center justify-between text-sm text-blue-800 mb-2">
-              <span>Uploading file {uploadProgress.current} of {uploadProgress.total}: <span className="font-mono">{uploadProgress.fileName}</span></span>
-              <span>{uploadProgress.pct}%</span>
+        {Object.keys(fileProgress).length > 0 && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 space-y-3">
+            <div className="flex items-center justify-between text-sm font-medium text-blue-800">
+              <span>Uploading {Object.values(fileProgress).filter((f) => f.status === 'done').length} / {Object.keys(fileProgress).length} files ({MAX_PARALLEL} parallel)</span>
+              <span className="text-xs font-normal">{useS3 ? 'Direct to S3' : 'Server upload'}</span>
             </div>
-            <div className="w-full bg-blue-200 rounded-full h-2">
-              <div
-                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${uploadProgress.pct}%` }}
-              />
+            <div className="max-h-48 overflow-y-auto space-y-2">
+              {Object.entries(fileProgress).map(([name, { pct, status }]) => (
+                <div key={name}>
+                  <div className="flex items-center justify-between text-xs text-blue-700 mb-1">
+                    <span className="font-mono truncate max-w-xs">{name}</span>
+                    <span>{status === 'done' ? 'Done' : `${pct}%`}</span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-1.5">
+                    <div
+                      className={`h-1.5 rounded-full transition-all duration-300 ${status === 'done' ? 'bg-green-500' : 'bg-blue-600'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -346,7 +371,7 @@ export default function UploadPage() {
           {submitting ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin" />
-              {uploadProgress ? 'Uploading Files...' : 'Starting Pipeline...'}
+              {Object.keys(fileProgress).length > 0 ? 'Uploading Files...' : 'Starting Pipeline...'}
             </>
           ) : (
             <>

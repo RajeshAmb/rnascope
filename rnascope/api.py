@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from rnascope.agents.chat import ChatAgent
 from rnascope.config import settings
+from rnascope.infra.aws import _get_s3
 from rnascope.infra.checkpoint import get_job_state, save_job_state
 
 logger = logging.getLogger(__name__)
@@ -611,6 +612,111 @@ async def init_job(
 
     _jobs_store[job_id] = job_state
     return {"job_id": job_id, "status": "uploading"}
+
+
+# ---------------------------------------------------------------------------
+# S3 presigned upload
+# ---------------------------------------------------------------------------
+
+S3_UPLOAD_ENABLED = bool(settings.aws_access_key_id and settings.s3_bucket_raw)
+
+
+class PresignedUrlRequest(BaseModel):
+    filename: str
+    content_type: str = "application/gzip"
+    part_count: int = 1  # number of parts for multipart upload
+
+
+@api_app.post("/api/jobs/{job_id}/presign")
+async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
+    """Generate S3 presigned URL(s) for direct browser-to-S3 upload."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not S3_UPLOAD_ENABLED:
+        raise HTTPException(status_code=501, detail="S3 upload not configured")
+
+    s3 = _get_s3()
+    bucket = settings.s3_bucket_raw
+    s3_key = f"{job_id}/{req.filename}"
+
+    if req.part_count <= 1:
+        # Single presigned PUT for files < 5GB
+        url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": s3_key, "ContentType": req.content_type},
+            ExpiresIn=3600,
+        )
+        return {"method": "PUT", "url": url, "s3_key": s3_key}
+
+    # Multipart upload for large files (>5GB)
+    mpu = s3.create_multipart_upload(Bucket=bucket, Key=s3_key, ContentType=req.content_type)
+    upload_id = mpu["UploadId"]
+
+    part_urls = []
+    for part_num in range(1, req.part_count + 1):
+        url = s3.generate_presigned_url(
+            "upload_part",
+            Params={"Bucket": bucket, "Key": s3_key, "UploadId": upload_id, "PartNumber": part_num},
+            ExpiresIn=3600,
+        )
+        part_urls.append({"part_number": part_num, "url": url})
+
+    return {"method": "MULTIPART", "upload_id": upload_id, "s3_key": s3_key, "parts": part_urls}
+
+
+class CompleteMultipartRequest(BaseModel):
+    s3_key: str
+    upload_id: str
+    parts: list[dict]  # [{"part_number": 1, "etag": "..."}]
+
+
+@api_app.post("/api/jobs/{job_id}/presign/complete")
+async def complete_multipart(job_id: str, req: CompleteMultipartRequest):
+    """Complete an S3 multipart upload after all parts are uploaded."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    s3 = _get_s3()
+    bucket = settings.s3_bucket_raw
+
+    s3.complete_multipart_upload(
+        Bucket=bucket,
+        Key=req.s3_key,
+        UploadId=req.upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": p["part_number"], "ETag": p["etag"]} for p in req.parts]},
+    )
+
+    filename = req.s3_key.split("/", 1)[-1]
+    if filename not in _jobs_store[job_id]["files"]:
+        _jobs_store[job_id]["files"].append(filename)
+
+    # Get the actual file size from S3
+    head = s3.head_object(Bucket=bucket, Key=req.s3_key)
+    size_gb = head["ContentLength"] / (1024**3)
+    _jobs_store[job_id]["dataset_size_gb"] = round(_jobs_store[job_id]["dataset_size_gb"] + size_gb, 2)
+
+    return {"status": "complete", "s3_key": req.s3_key, "size_gb": round(size_gb, 2)}
+
+
+@api_app.post("/api/jobs/{job_id}/presign/register")
+async def register_s3_file(job_id: str, filename: str = Form(...), size_bytes: int = Form(0)):
+    """Register a file after single PUT presigned upload completes."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if filename not in _jobs_store[job_id]["files"]:
+        _jobs_store[job_id]["files"].append(filename)
+
+    size_gb = size_bytes / (1024**3)
+    _jobs_store[job_id]["dataset_size_gb"] = round(_jobs_store[job_id]["dataset_size_gb"] + size_gb, 2)
+
+    return {"status": "registered", "filename": filename, "size_gb": round(size_gb, 2)}
+
+
+@api_app.get("/api/upload-mode")
+async def get_upload_mode():
+    """Tell the frontend whether S3 direct upload is available."""
+    return {"s3_enabled": S3_UPLOAD_ENABLED, "max_chunk_mb": 50}
 
 
 STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
