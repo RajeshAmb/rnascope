@@ -565,6 +565,149 @@ def _generate_demo_results(job_id: str, species: str = "human",
 # Upload & Job creation
 # ---------------------------------------------------------------------------
 
+@api_app.post("/api/jobs/init")
+async def init_job(
+    project_name: str = Form(...),
+    species: str = Form("human"),
+    condition_a: str = Form(...),
+    condition_b: str = Form(...),
+    n_a: int = Form(...),
+    n_b: int = Form(...),
+    genotypes: str = Form(""),
+    time_points: str = Form(""),
+    tissue_type: str = Form(""),
+    disease_context: str = Form(""),
+    email: str = Form(""),
+):
+    """Initialize a job without files. Returns job_id for subsequent file uploads."""
+    job_id = str(uuid.uuid4())[:12]
+    job_dir = UPLOAD_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    job_state = {
+        "job_id": job_id,
+        "project_name": project_name,
+        "species": species,
+        "condition_a": condition_a,
+        "condition_b": condition_b,
+        "n_a": n_a,
+        "n_b": n_b,
+        "n_samples": n_a + n_b,
+        "genotypes": [g.strip() for g in genotypes.split(",") if g.strip()] if genotypes else [],
+        "time_points": [t.strip() for t in time_points.split(",") if t.strip()] if time_points else [],
+        "tissue_type": tissue_type,
+        "disease_context": disease_context,
+        "email": email,
+        "dataset_size_gb": 0.0,
+        "files": [],
+        "status": "uploading",
+        "current_step": None,
+        "steps_completed": [],
+        "total_steps": 11,
+        "pct_complete": 0,
+        "cost_so_far_usd": 0.0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    _jobs_store[job_id] = job_state
+    return {"job_id": job_id, "status": "uploading"}
+
+
+STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
+
+
+@api_app.post("/api/jobs/{job_id}/upload")
+async def upload_file(
+    job_id: str,
+    file: UploadFile = File(...),
+    chunk_index: int = Form(0),
+    total_chunks: int = Form(1),
+    filename: str = Form(""),
+):
+    """Upload a file chunk. Chunks are appended sequentially and assembled on final chunk."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    real_name = filename or file.filename
+    job_dir = UPLOAD_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    if total_chunks == 1:
+        # Single-chunk file (small file, no chunking needed)
+        dest = job_dir / real_name
+        file_size = 0
+        with open(dest, "wb") as f:
+            while buf := await file.read(STREAM_CHUNK):
+                f.write(buf)
+                file_size += len(buf)
+
+        if real_name not in _jobs_store[job_id]["files"]:
+            _jobs_store[job_id]["files"].append(real_name)
+        _jobs_store[job_id]["dataset_size_gb"] = round(
+            _jobs_store[job_id]["dataset_size_gb"] + file_size / (1024**3), 2
+        )
+        return {"filename": real_name, "chunk": 0, "total_chunks": 1, "status": "complete",
+                "size_mb": round(file_size / (1024**2), 2)}
+
+    # Multi-chunk: write chunk to a temp part file
+    chunk_dir = job_dir / f".chunks_{real_name}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = chunk_dir / f"part_{chunk_index:05d}"
+
+    chunk_size = 0
+    with open(chunk_path, "wb") as f:
+        while buf := await file.read(STREAM_CHUNK):
+            f.write(buf)
+            chunk_size += len(buf)
+
+    # Check if all chunks have arrived
+    received = len(list(chunk_dir.glob("part_*")))
+
+    if received >= total_chunks:
+        # Reassemble the full file
+        dest = job_dir / real_name
+        total_size = 0
+        with open(dest, "wb") as out:
+            for i in range(total_chunks):
+                part = chunk_dir / f"part_{i:05d}"
+                data = part.read_bytes()
+                out.write(data)
+                total_size += len(data)
+
+        # Clean up chunk dir
+        import shutil
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+
+        if real_name not in _jobs_store[job_id]["files"]:
+            _jobs_store[job_id]["files"].append(real_name)
+        _jobs_store[job_id]["dataset_size_gb"] = round(
+            _jobs_store[job_id]["dataset_size_gb"] + total_size / (1024**3), 2
+        )
+        return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
+                "status": "complete", "size_mb": round(total_size / (1024**2), 2)}
+
+    return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
+            "status": "uploading", "received": received}
+
+
+@api_app.post("/api/jobs/{job_id}/start")
+async def start_job(job_id: str):
+    """Start the pipeline after all files are uploaded."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = _jobs_store[job_id]
+    if not job["files"]:
+        raise HTTPException(status_code=400, detail="No files uploaded yet")
+
+    job["status"] = "running"
+    job["current_step"] = "ingestion"
+
+    asyncio.get_event_loop().run_in_executor(None, _simulate_pipeline, job_id)
+
+    return {"job_id": job_id, "status": "running", "files_uploaded": len(job["files"]), "size_gb": job["dataset_size_gb"]}
+
+
 @api_app.post("/api/jobs")
 async def create_job(
     project_name: str = Form(...),
@@ -580,7 +723,7 @@ async def create_job(
     email: str = Form(""),
     files: list[UploadFile] = File(...),
 ):
-    """Upload FASTQ files and start a new pipeline job."""
+    """Legacy endpoint — upload files and start job in one request (limited to ~100MB total)."""
     job_id = str(uuid.uuid4())[:12]
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -589,9 +732,12 @@ async def create_job(
     total_size = 0
     for f in files:
         dest = job_dir / f.filename
-        content = await f.read()
-        dest.write_bytes(content)
-        total_size += len(content)
+        file_size = 0
+        with open(dest, "wb") as out:
+            while chunk := await f.read(CHUNK_SIZE):
+                out.write(chunk)
+                file_size += len(chunk)
+        total_size += file_size
         uploaded_files.append(f.filename)
 
     size_gb = round(total_size / (1024**3), 2)

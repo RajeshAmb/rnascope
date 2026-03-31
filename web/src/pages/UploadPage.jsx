@@ -2,12 +2,13 @@ import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, X, Loader2, FlaskConical } from 'lucide-react'
-import { createJob } from '../api'
+import { initJob, uploadFile, startJob } from '../api'
 
 export default function UploadPage() {
   const navigate = useNavigate()
   const [files, setFiles] = useState([])
   const [submitting, setSubmitting] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(null) // { current, total, fileName, pct }
   const [error, setError] = useState(null)
   const [form, setForm] = useState({
     project_name: '',
@@ -48,23 +49,36 @@ export default function UploadPage() {
 
     setSubmitting(true)
     setError(null)
-
-    const fd = new FormData()
-    Object.entries(form).forEach(([k, v]) => fd.append(k, v))
-    files.forEach((f) => fd.append('files', f))
+    setUploadProgress(null)
 
     try {
-      const res = await createJob(fd)
-      navigate(`/results/${res.job_id}`)
+      // Step 1: Create job with metadata only
+      const { job_id } = await initJob(form)
+
+      // Step 2: Upload files one at a time (avoids Cloudflare 100MB limit)
+      for (let i = 0; i < files.length; i++) {
+        setUploadProgress({ current: i + 1, total: files.length, fileName: files[i].name, pct: 0 })
+        await uploadFile(job_id, files[i], (pct) => {
+          setUploadProgress((prev) => ({ ...prev, pct: Math.round(pct * 100) }))
+        })
+      }
+
+      // Step 3: Start the pipeline
+      setUploadProgress(null)
+      await startJob(job_id)
+      navigate(`/results/${job_id}`)
     } catch (err) {
       setError(err.message)
     } finally {
       setSubmitting(false)
+      setUploadProgress(null)
     }
   }
 
   const totalSize = files.reduce((s, f) => s + f.size, 0)
-  const sizeMB = (totalSize / 1024 / 1024).toFixed(1)
+  const sizeDisplay = totalSize >= 1024 * 1024 * 1024
+    ? (totalSize / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+    : (totalSize / 1024 / 1024).toFixed(1) + ' MB'
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -100,7 +114,7 @@ export default function UploadPage() {
             <div className="mt-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-gray-700">
-                  {files.length} file{files.length > 1 ? 's' : ''} ({sizeMB} MB)
+                  {files.length} file{files.length > 1 ? 's' : ''} ({sizeDisplay})
                 </span>
                 <button
                   type="button"
@@ -309,6 +323,21 @@ export default function UploadPage() {
           </div>
         )}
 
+        {uploadProgress && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
+            <div className="flex items-center justify-between text-sm text-blue-800 mb-2">
+              <span>Uploading file {uploadProgress.current} of {uploadProgress.total}: <span className="font-mono">{uploadProgress.fileName}</span></span>
+              <span>{uploadProgress.pct}%</span>
+            </div>
+            <div className="w-full bg-blue-200 rounded-full h-2">
+              <div
+                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${uploadProgress.pct}%` }}
+              />
+            </div>
+          </div>
+        )}
+
         <button
           type="submit"
           disabled={submitting}
@@ -317,7 +346,7 @@ export default function UploadPage() {
           {submitting ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin" />
-              Uploading & Starting Pipeline...
+              {uploadProgress ? 'Uploading Files...' : 'Starting Pipeline...'}
             </>
           ) : (
             <>
