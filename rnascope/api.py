@@ -42,6 +42,13 @@ _jobs_store: dict[str, dict] = {}
 UPLOAD_DIR = Path(os.environ.get("RNASCOPE_UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# Clean up any leftover uploads from previous deploys
+import shutil as _shutil
+for _old_dir in UPLOAD_DIR.iterdir():
+    if _old_dir.is_dir():
+        _shutil.rmtree(_old_dir, ignore_errors=True)
+        logger.info("Startup cleanup: removed %s", _old_dir.name)
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -709,7 +716,8 @@ async def register_s3_file(job_id: str, filename: str = Form(...), size_bytes: i
 @api_app.get("/api/upload-mode")
 async def get_upload_mode():
     """Tell the frontend whether S3 direct upload is available."""
-    return {"s3_enabled": S3_UPLOAD_ENABLED, "max_chunk_mb": 50}
+    free_gb = _get_disk_free_gb()
+    return {"s3_enabled": S3_UPLOAD_ENABLED, "max_chunk_mb": 10, "disk_free_gb": round(free_gb, 2)}
 
 
 STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
@@ -742,6 +750,10 @@ async def upload_file(
     """Upload a file chunk. Chunks are appended sequentially and assembled on final chunk."""
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    free_gb = _get_disk_free_gb()
+    if free_gb < 0.5:
+        raise HTTPException(status_code=507, detail=f"Disk space low ({free_gb:.1f} GB free). Please wait for running jobs to complete or contact support.")
 
     real_name = filename or file.filename
     job_dir = UPLOAD_DIR / job_id
@@ -943,6 +955,25 @@ def _simulate_pipeline(job_id: str):
             "pct_complete": 100.0,
             "message": "Pipeline complete! Results are ready.",
         })
+
+        # Clean up uploaded files to free disk space
+        _cleanup_job_uploads(job_id)
+
+
+def _cleanup_job_uploads(job_id: str):
+    """Remove uploaded files after pipeline completes to free disk space."""
+    import shutil
+    job_dir = UPLOAD_DIR / job_id
+    if job_dir.exists():
+        shutil.rmtree(job_dir, ignore_errors=True)
+        logger.info("Cleaned up uploads for job %s", job_id)
+
+
+def _get_disk_free_gb() -> float:
+    """Return free disk space in GB."""
+    import shutil
+    usage = shutil.disk_usage(UPLOAD_DIR)
+    return usage.free / (1024**3)
 
 
 def _broadcast_sync(job_id: str, message: dict):

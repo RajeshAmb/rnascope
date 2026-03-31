@@ -13,11 +13,15 @@ export default function UploadPage() {
   const [metadataPreview, setMetadataPreview] = useState(null) // { headers: [], rows: [] }
   const [error, setError] = useState(null)
   const [useS3, setUseS3] = useState(null) // null = not checked yet
+  const [diskFreeGb, setDiskFreeGb] = useState(null)
   const MAX_PARALLEL = 3
 
   // Check if S3 direct upload is available on mount
   useState(() => {
-    getUploadMode().then((m) => setUseS3(m.s3_enabled)).catch(() => setUseS3(false))
+    getUploadMode().then((m) => {
+      setUseS3(m.s3_enabled)
+      setDiskFreeGb(m.disk_free_gb)
+    }).catch(() => setUseS3(false))
   })
   const [form, setForm] = useState({
     project_name: '',
@@ -421,6 +425,12 @@ export default function UploadPage() {
             </div>
           </div>
         </div>
+
+        {diskFreeGb !== null && diskFreeGb < 2 && (
+          <div className={`border rounded-lg px-4 py-3 text-sm ${diskFreeGb < 0.5 ? 'bg-red-50 border-red-200 text-red-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+            Server disk space low: <strong>{diskFreeGb.toFixed(1)} GB</strong> free. {diskFreeGb < 0.5 ? 'Uploads may fail.' : 'Large uploads may not fit.'} {!useS3 && 'Consider enabling S3 for direct uploads.'}
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
