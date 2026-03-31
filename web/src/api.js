@@ -15,41 +15,63 @@ export async function initJob(metadata) {
 }
 
 const CHUNK_SIZE = 50 * 1024 * 1024 // 50 MB per chunk
+const MAX_RETRIES = 5
+const BASE_DELAY_MS = 1000 // 1s, doubles each retry (1s, 2s, 4s, 8s, 16s)
 
-export async function uploadFile(jobId, file, onProgress) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function withRetry(fn, retries = MAX_RETRIES, onRetry) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt === retries) throw err
+      const waitMs = BASE_DELAY_MS * Math.pow(2, attempt)
+      if (onRetry) onRetry(attempt + 1, retries, waitMs, err.message)
+      await delay(waitMs)
+    }
+  }
+}
+
+export async function uploadFile(jobId, file, onProgress, onRetryStatus) {
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
 
   for (let i = 0; i < totalChunks; i++) {
     const start = i * CHUNK_SIZE
     const end = Math.min(start + CHUNK_SIZE, file.size)
-    const chunk = file.slice(start, end)
 
-    const fd = new FormData()
-    fd.append('file', chunk, file.name)
-    fd.append('chunk_index', i)
-    fd.append('total_chunks', totalChunks)
-    fd.append('filename', file.name)
+    await withRetry(() => {
+      const chunk = file.slice(start, end)
+      const fd = new FormData()
+      fd.append('file', chunk, file.name)
+      fd.append('chunk_index', i)
+      fd.append('total_chunks', totalChunks)
+      fd.append('filename', file.name)
 
-    await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${BASE}/api/jobs/${jobId}/upload`)
-      if (onProgress) {
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const chunkProgress = (start + e.loaded) / file.size
-            onProgress(chunkProgress)
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${BASE}/api/jobs/${jobId}/upload`)
+        if (onProgress) {
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              onProgress((start + e.loaded) / file.size)
+            }
           }
         }
-      }
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText))
-        } else {
-          reject(new Error(xhr.responseText || `Upload failed (${xhr.status})`))
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(JSON.parse(xhr.responseText))
+          } else {
+            reject(new Error(xhr.responseText || `Upload failed (${xhr.status})`))
+          }
         }
-      }
-      xhr.onerror = () => reject(new Error('Network error during upload'))
-      xhr.send(fd)
+        xhr.onerror = () => reject(new Error('Network error during upload'))
+        xhr.send(fd)
+      })
+    }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+      if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks, error: errMsg })
     })
   }
 
@@ -69,21 +91,25 @@ export async function getUploadMode() {
 
 const S3_PART_SIZE = 50 * 1024 * 1024 // 50 MB per S3 multipart part
 
-export async function uploadFileS3(jobId, file, onProgress) {
+export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
   const partCount = Math.ceil(file.size / S3_PART_SIZE)
 
-  // Get presigned URL(s)
-  const presignRes = await fetch(`${BASE}/api/jobs/${jobId}/presign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ filename: file.name, content_type: file.type || 'application/gzip', part_count: partCount }),
+  // Get presigned URL(s) — retry this too
+  const presign = await withRetry(async () => {
+    const res = await fetch(`${BASE}/api/jobs/${jobId}/presign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, content_type: file.type || 'application/gzip', part_count: partCount }),
+    })
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
+  }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+    if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: 0, totalChunks: partCount, error: errMsg })
   })
-  if (!presignRes.ok) throw new Error(await presignRes.text())
-  const presign = await presignRes.json()
 
   if (presign.method === 'PUT') {
-    // Single PUT upload (file < 5GB)
-    await new Promise((resolve, reject) => {
+    // Single PUT upload (file < 5GB) with retry
+    await withRetry(() => new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
       xhr.open('PUT', presign.url)
       xhr.setRequestHeader('Content-Type', file.type || 'application/gzip')
@@ -95,6 +121,8 @@ export async function uploadFileS3(jobId, file, onProgress) {
       xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`S3 upload failed (${xhr.status})`))
       xhr.onerror = () => reject(new Error('Network error during S3 upload'))
       xhr.send(file)
+    }), MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+      if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: 1, totalChunks: 1, error: errMsg })
     })
 
     // Register file with backend
@@ -104,43 +132,50 @@ export async function uploadFileS3(jobId, file, onProgress) {
     await fetch(`${BASE}/api/jobs/${jobId}/presign/register`, { method: 'POST', body: regFd })
 
   } else {
-    // Multipart upload for large files
+    // Multipart upload — each part retries independently
     const parts = []
     for (let i = 0; i < presign.parts.length; i++) {
       const start = i * S3_PART_SIZE
       const end = Math.min(start + S3_PART_SIZE, file.size)
-      const chunk = file.slice(start, end)
       const partInfo = presign.parts[i]
 
-      const etag = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('PUT', partInfo.url)
-        if (onProgress) {
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              onProgress((start + e.loaded) / file.size)
+      const etag = await withRetry(() => {
+        const chunk = file.slice(start, end)
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('PUT', partInfo.url)
+          if (onProgress) {
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                onProgress((start + e.loaded) / file.size)
+              }
             }
           }
-        }
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(xhr.getResponseHeader('ETag'))
-          } else {
-            reject(new Error(`S3 part upload failed (${xhr.status})`))
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(xhr.getResponseHeader('ETag'))
+            } else {
+              reject(new Error(`S3 part upload failed (${xhr.status})`))
+            }
           }
-        }
-        xhr.onerror = () => reject(new Error('Network error during S3 part upload'))
-        xhr.send(chunk)
+          xhr.onerror = () => reject(new Error('Network error during S3 part upload'))
+          xhr.send(chunk)
+        })
+      }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+        if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
       })
 
       parts.push({ part_number: partInfo.part_number, etag })
     }
 
     // Complete multipart upload
-    await fetch(`${BASE}/api/jobs/${jobId}/presign/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ s3_key: presign.s3_key, upload_id: presign.upload_id, parts }),
+    await withRetry(async () => {
+      const res = await fetch(`${BASE}/api/jobs/${jobId}/presign/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ s3_key: presign.s3_key, upload_id: presign.upload_id, parts }),
+      })
+      if (!res.ok) throw new Error(await res.text())
     })
   }
 

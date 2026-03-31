@@ -68,11 +68,13 @@ export default function UploadPage() {
       const uploadNext = async () => {
         while (queue.length > 0) {
           const file = queue.shift()
-          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 0, status: 'uploading' } }))
+          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 0, status: 'uploading', retry: null } }))
           await uploader(job_id, file, (pct) => {
-            setFileProgress((prev) => ({ ...prev, [file.name]: { pct: Math.round(pct * 100), status: 'uploading' } }))
+            setFileProgress((prev) => ({ ...prev, [file.name]: { pct: Math.round(pct * 100), status: 'uploading', retry: null } }))
+          }, (retryInfo) => {
+            setFileProgress((prev) => ({ ...prev, [file.name]: { ...prev[file.name], status: 'retrying', retry: retryInfo } }))
           })
-          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 100, status: 'done' } }))
+          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 100, status: 'done', retry: null } }))
         }
       }
 
@@ -345,18 +347,31 @@ export default function UploadPage() {
               <span className="text-xs font-normal">{useS3 ? 'Direct to S3' : 'Server upload'}</span>
             </div>
             <div className="max-h-48 overflow-y-auto space-y-2">
-              {Object.entries(fileProgress).map(([name, { pct, status }]) => (
+              {Object.entries(fileProgress).map(([name, { pct, status, retry }]) => (
                 <div key={name}>
                   <div className="flex items-center justify-between text-xs text-blue-700 mb-1">
                     <span className="font-mono truncate max-w-xs">{name}</span>
-                    <span>{status === 'done' ? 'Done' : `${pct}%`}</span>
+                    <span>
+                      {status === 'done' && 'Done'}
+                      {status === 'uploading' && `${pct}%`}
+                      {status === 'retrying' && retry && (
+                        <span className="text-amber-600">
+                          Retry {retry.attempt}/{retry.max} (chunk {retry.chunk}/{retry.totalChunks}) — waiting {Math.round(retry.waitMs / 1000)}s
+                        </span>
+                      )}
+                    </span>
                   </div>
                   <div className="w-full bg-blue-200 rounded-full h-1.5">
                     <div
-                      className={`h-1.5 rounded-full transition-all duration-300 ${status === 'done' ? 'bg-green-500' : 'bg-blue-600'}`}
+                      className={`h-1.5 rounded-full transition-all duration-300 ${
+                        status === 'done' ? 'bg-green-500' : status === 'retrying' ? 'bg-amber-500' : 'bg-blue-600'
+                      }`}
                       style={{ width: `${pct}%` }}
                     />
                   </div>
+                  {status === 'retrying' && retry && (
+                    <p className="text-xs text-amber-600 mt-0.5">{retry.error}</p>
+                  )}
                 </div>
               ))}
             </div>
