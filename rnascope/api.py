@@ -601,6 +601,7 @@ async def init_job(
         "email": email,
         "dataset_size_gb": 0.0,
         "files": [],
+        "metadata_file": None,
         "status": "uploading",
         "current_step": None,
         "steps_completed": [],
@@ -687,15 +688,10 @@ async def complete_multipart(job_id: str, req: CompleteMultipartRequest):
     )
 
     filename = req.s3_key.split("/", 1)[-1]
-    if filename not in _jobs_store[job_id]["files"]:
-        _jobs_store[job_id]["files"].append(filename)
-
-    # Get the actual file size from S3
     head = s3.head_object(Bucket=bucket, Key=req.s3_key)
-    size_gb = head["ContentLength"] / (1024**3)
-    _jobs_store[job_id]["dataset_size_gb"] = round(_jobs_store[job_id]["dataset_size_gb"] + size_gb, 2)
+    _register_file(job_id, filename, head["ContentLength"])
 
-    return {"status": "complete", "s3_key": req.s3_key, "size_gb": round(size_gb, 2)}
+    return {"status": "complete", "s3_key": req.s3_key, "size_gb": round(head["ContentLength"] / (1024**3), 2)}
 
 
 @api_app.post("/api/jobs/{job_id}/presign/register")
@@ -704,13 +700,9 @@ async def register_s3_file(job_id: str, filename: str = Form(...), size_bytes: i
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if filename not in _jobs_store[job_id]["files"]:
-        _jobs_store[job_id]["files"].append(filename)
+    _register_file(job_id, filename, size_bytes)
 
-    size_gb = size_bytes / (1024**3)
-    _jobs_store[job_id]["dataset_size_gb"] = round(_jobs_store[job_id]["dataset_size_gb"] + size_gb, 2)
-
-    return {"status": "registered", "filename": filename, "size_gb": round(size_gb, 2)}
+    return {"status": "registered", "filename": filename, "size_gb": round(size_bytes / (1024**3), 2)}
 
 
 @api_app.get("/api/upload-mode")
@@ -720,6 +712,22 @@ async def get_upload_mode():
 
 
 STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
+_METADATA_EXTS = {".csv", ".tsv", ".txt"}
+
+
+def _is_metadata_file(filename: str) -> bool:
+    return Path(filename).suffix.lower() in _METADATA_EXTS
+
+
+def _register_file(job_id: str, filename: str, size_bytes: int):
+    """Register an uploaded file as metadata or data in the job store."""
+    job = _jobs_store[job_id]
+    if _is_metadata_file(filename):
+        job["metadata_file"] = filename
+    else:
+        if filename not in job["files"]:
+            job["files"].append(filename)
+        job["dataset_size_gb"] = round(job["dataset_size_gb"] + size_bytes / (1024**3), 2)
 
 
 @api_app.post("/api/jobs/{job_id}/upload")
@@ -747,11 +755,7 @@ async def upload_file(
                 f.write(buf)
                 file_size += len(buf)
 
-        if real_name not in _jobs_store[job_id]["files"]:
-            _jobs_store[job_id]["files"].append(real_name)
-        _jobs_store[job_id]["dataset_size_gb"] = round(
-            _jobs_store[job_id]["dataset_size_gb"] + file_size / (1024**3), 2
-        )
+        _register_file(job_id, real_name, file_size)
         return {"filename": real_name, "chunk": 0, "total_chunks": 1, "status": "complete",
                 "size_mb": round(file_size / (1024**2), 2)}
 
@@ -784,11 +788,7 @@ async def upload_file(
         import shutil
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
-        if real_name not in _jobs_store[job_id]["files"]:
-            _jobs_store[job_id]["files"].append(real_name)
-        _jobs_store[job_id]["dataset_size_gb"] = round(
-            _jobs_store[job_id]["dataset_size_gb"] + total_size / (1024**3), 2
-        )
+        _register_file(job_id, real_name, total_size)
         return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
                 "status": "complete", "size_mb": round(total_size / (1024**2), 2)}
 
