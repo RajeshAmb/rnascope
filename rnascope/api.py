@@ -19,7 +19,6 @@ from pydantic import BaseModel
 
 from rnascope.agents.chat import ChatAgent
 from rnascope.config import settings
-from rnascope.infra.aws import _get_s3
 from rnascope.infra.checkpoint import get_job_state, save_job_state
 
 logger = logging.getLogger(__name__)
@@ -636,6 +635,7 @@ async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
     if not S3_UPLOAD_ENABLED:
         raise HTTPException(status_code=501, detail="S3 upload not configured")
 
+    from rnascope.infra.aws import _get_s3
     s3 = _get_s3()
     bucket = settings.s3_bucket_raw
     s3_key = f"{job_id}/{req.filename}"
@@ -677,6 +677,7 @@ async def complete_multipart(job_id: str, req: CompleteMultipartRequest):
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    from rnascope.infra.aws import _get_s3
     s3 = _get_s3()
     bucket = settings.s3_bucket_raw
 
@@ -774,18 +775,18 @@ async def upload_file(
     received = len(list(chunk_dir.glob("part_*")))
 
     if received >= total_chunks:
-        # Reassemble the full file
+        # Reassemble the full file — stream to avoid loading into memory
+        import shutil
         dest = job_dir / real_name
         total_size = 0
         with open(dest, "wb") as out:
             for i in range(total_chunks):
                 part = chunk_dir / f"part_{i:05d}"
-                data = part.read_bytes()
-                out.write(data)
-                total_size += len(data)
+                total_size += part.stat().st_size
+                with open(part, "rb") as inp:
+                    shutil.copyfileobj(inp, out)
 
         # Clean up chunk dir
-        import shutil
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
         _register_file(job_id, real_name, total_size)

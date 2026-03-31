@@ -14,7 +14,7 @@ export async function initJob(metadata) {
   return res.json()
 }
 
-const CHUNK_SIZE = 50 * 1024 * 1024 // 50 MB per chunk
+const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB per chunk (fits Render's 512MB RAM with parallel uploads)
 const MAX_RETRIES = 5
 const BASE_DELAY_MS = 1000 // 1s, doubles each retry (1s, 2s, 4s, 8s, 16s)
 
@@ -89,7 +89,7 @@ export async function getUploadMode() {
   return res.json()
 }
 
-const S3_PART_SIZE = 50 * 1024 * 1024 // 50 MB per S3 multipart part
+const S3_PART_SIZE = 10 * 1024 * 1024 // 10 MB per S3 multipart part
 
 export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
   const partCount = Math.ceil(file.size / S3_PART_SIZE)
