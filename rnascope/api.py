@@ -568,6 +568,7 @@ def _generate_demo_results(job_id: str, species: str = "human",
 async def init_job(
     project_name: str = Form(...),
     species: str = Form("human"),
+    domain: str = Form("biomedical"),
     condition_a: str = Form(...),
     condition_b: str = Form(...),
     n_a: int = Form(...),
@@ -585,6 +586,7 @@ async def init_job(
         "job_id": job_id,
         "project_name": project_name,
         "species": species,
+        "domain": domain,
         "condition_a": condition_a,
         "condition_b": condition_b,
         "n_a": n_a,
@@ -610,6 +612,7 @@ async def init_job(
 
 STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
 _METADATA_EXTS = {".csv", ".tsv", ".txt"}
+_assembly_locks: dict[str, asyncio.Lock] = {}  # per-file locks to prevent concurrent reassembly
 
 
 def _is_metadata_file(filename: str) -> bool:
@@ -668,27 +671,33 @@ async def upload_file(
             f.write(buf)
             chunk_size += len(buf)
 
-    # Check if all chunks have arrived
-    received = len(list(chunk_dir.glob("part_*")))
+    # Check if all chunks have arrived — use a lock to prevent concurrent reassembly
+    lock_key = f"{job_id}/{real_name}"
+    if lock_key not in _assembly_locks:
+        _assembly_locks[lock_key] = asyncio.Lock()
 
-    if received >= total_chunks:
-        # Reassemble the full file
-        dest = job_dir / real_name
-        total_size = 0
-        with open(dest, "wb") as out:
-            for i in range(total_chunks):
-                part = chunk_dir / f"part_{i:05d}"
-                total_size += part.stat().st_size
-                with open(part, "rb") as inp:
-                    shutil.copyfileobj(inp, out)
+    async with _assembly_locks[lock_key]:
+        received = len(list(chunk_dir.glob("part_*")))
 
-        # Clean up chunk dir
-        shutil.rmtree(chunk_dir, ignore_errors=True)
+        if received >= total_chunks:
+            # Reassemble the full file
+            dest = job_dir / real_name
+            total_size = 0
+            with open(dest, "wb") as out:
+                for i in range(total_chunks):
+                    part = chunk_dir / f"part_{i:05d}"
+                    total_size += part.stat().st_size
+                    with open(part, "rb") as inp:
+                        shutil.copyfileobj(inp, out)
 
-        # Upload to S3 and clean up local file
-        await _upload_to_s3_and_cleanup(job_id, real_name, dest, total_size)
-        return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
-                "status": "complete", "size_mb": round(total_size / (1024**2), 2)}
+            # Clean up chunk dir and lock
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            _assembly_locks.pop(lock_key, None)
+
+            # Upload to S3 and clean up local file
+            await _upload_to_s3_and_cleanup(job_id, real_name, dest, total_size)
+            return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
+                    "status": "complete", "size_mb": round(total_size / (1024**2), 2)}
 
     return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
             "status": "uploading", "received": received}

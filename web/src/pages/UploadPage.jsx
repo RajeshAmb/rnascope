@@ -67,8 +67,8 @@ export default function UploadPage() {
       const uploadNext = async () => {
         while (queue.length > 0) {
           const file = queue.shift()
-          await uploadFile(job_id, file, (pct) => {
-            fileProgress[file.name] = pct
+          await uploadFile(job_id, file, (fraction) => {
+            fileProgress[file.name] = Math.round(fraction * 100)
             setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress } }))
           })
           filesDone++
