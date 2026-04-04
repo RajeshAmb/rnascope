@@ -16,6 +16,8 @@ import AnnotationTable from '../components/charts/AnnotationTable'
 import TranscriptPlot from '../components/charts/TranscriptPlot'
 import WGCNAPlot from '../components/charts/WGCNAPlot'
 import DeconvolutionPlot from '../components/charts/DeconvolutionPlot'
+import VennDiagram from '../components/charts/VennDiagram'
+import TreatmentHeatmap from '../components/charts/TreatmentHeatmap'
 import { Loader2, Lightbulb, FlaskConical, BookOpen, Download } from 'lucide-react'
 
 const TABS = [
@@ -184,6 +186,8 @@ export default function ResultsPage() {
   const transcriptRef = useRef(null)
   const wgcnaRef = useRef(null)
   const deconvRef = useRef(null)
+  const vennRef = useRef(null)
+  const treatmentHeatmapRef = useRef(null)
 
   useEffect(() => {
     const load = async () => {
@@ -345,6 +349,16 @@ export default function ResultsPage() {
               <ChartCard title="Expression Heatmap" plotRef={heatmapRef} csvData={heatmapCSV(results.heatmap)}>
                 <HeatmapPlot ref={heatmapRef} data={results.heatmap} />
               </ChartCard>
+              {results.venn && (
+                <ChartCard title="Venn Diagram — Up-regulated DEGs" plotRef={vennRef}>
+                  <VennDiagram ref={vennRef} data={results.venn} />
+                </ChartCard>
+              )}
+              {results.treatment_heatmap && (
+                <ChartCard title="Treatment-wise Expression Profiles" plotRef={treatmentHeatmapRef}>
+                  <TreatmentHeatmap ref={treatmentHeatmapRef} data={results.treatment_heatmap} />
+                </ChartCard>
+              )}
             </div>
           )}
 

@@ -544,6 +544,40 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "method": "xCell",
     }
 
+    # Venn diagram data — up-regulated DEGs split into condition-specific sets
+    up_genes = [g["gene"] for g in volcano_data if g["direction"] == "up"]
+    down_genes = [g["gene"] for g in volcano_data if g["direction"] == "down"]
+    # Simulate two overlapping sets (e.g., two time points or sub-conditions)
+    mid = len(up_genes) // 2
+    overlap = max(1, len(up_genes) // 4)
+    venn_data = {
+        "set_a": up_genes[:mid + overlap],
+        "set_b": up_genes[mid - overlap:] if mid > overlap else up_genes,
+        "label_a": condition_a,
+        "label_b": condition_b,
+    }
+
+    # Treatment-wise expression heatmap — annotated genes grouped by treatment
+    treatment_genes = sorted(volcano_data, key=lambda g: -abs(g["log2fc"]))[:25]
+    treatments = []
+    for i in range(n_a):
+        treatments.append(f"{condition_a}_rep{i+1}")
+    for i in range(n_b):
+        treatments.append(f"{condition_b}_rep{i+1}")
+    treatment_heatmap = {
+        "genes": [g["gene"] for g in treatment_genes],
+        "treatments": treatments,
+        "matrix": [
+            [round(random.gauss(2.0 if j < n_a else 0.5, 0.6) * (1 if g["log2fc"] > 0 else -1), 2)
+             for j in range(n_samples)]
+            for g in treatment_genes
+        ],
+        "annotation_categories": [
+            ("Defense/Stress" if abs(g["log2fc"]) > 2 else "Metabolism" if g["log2fc"] > 0 else "Signaling")
+            for g in treatment_genes
+        ],
+    }
+
     return {
         "volcano": volcano_data,
         "pca": pca_data,
@@ -557,6 +591,8 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "transcripts": transcript_data,
         "wgcna": wgcna_data,
         "deconvolution": deconv_data,
+        "venn": venn_data,
+        "treatment_heatmap": treatment_heatmap,
     }
 
 
