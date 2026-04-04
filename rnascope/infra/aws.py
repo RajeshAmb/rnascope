@@ -25,11 +25,13 @@ _s3 = None
 def _get_s3():
     global _s3
     if _s3 is None:
+        from botocore.config import Config
         _s3 = boto3.client(
             "s3",
             region_name=settings.aws_region,
             aws_access_key_id=settings.aws_access_key_id or None,
             aws_secret_access_key=settings.aws_secret_access_key or None,
+            config=Config(signature_version="s3v4"),
         )
     return _s3
 
