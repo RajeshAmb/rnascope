@@ -237,6 +237,7 @@ export default function UploadPage() {
                   <option value="potato">Potato — S. tuberosum (DM v6.1)</option>
                   <option value="grape">Grape — Vitis vinifera (12X.v2)</option>
                   <option value="cotton">Cotton — Gossypium hirsutum (UTX-TM1 v2.1)</option>
+                  <option value="cotton_arboreum">Cotton — Gossypium arboreum (CRI-updated_v1)</option>
                 </optgroup>
                 <optgroup label="Microbiome / Soil / Food">
                   <option value="ecoli">E. coli (K-12 MG1655)</option>
@@ -285,7 +286,7 @@ export default function UploadPage() {
                 type="text"
                 value={form.condition_a}
                 onChange={(e) => setField('condition_a', e.target.value)}
-                placeholder="e.g. Disease, Treated, KO"
+                placeholder="e.g. Resistant, Disease, Treated, KO"
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
             </div>
@@ -295,7 +296,7 @@ export default function UploadPage() {
                 type="text"
                 value={form.condition_b}
                 onChange={(e) => setField('condition_b', e.target.value)}
-                placeholder="e.g. Healthy, Untreated, WT"
+                placeholder="e.g. Susceptible, Healthy, Untreated, WT"
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
             </div>
