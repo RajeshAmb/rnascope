@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # AWS
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
-    aws_region: str = "us-east-1"
+    aws_region: str = "us-east-2"
     s3_bucket_raw: str = "rnascope-raw-data"
     s3_bucket_results: str = "rnascope-results"
     s3_bucket_reports: str = "rnascope-reports"
