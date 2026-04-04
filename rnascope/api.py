@@ -6,13 +6,14 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -41,16 +42,6 @@ _jobs_store: dict[str, dict] = {}
 # Upload temp dir
 UPLOAD_DIR = Path(os.environ.get("RNASCOPE_UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# Clean up any leftover uploads from previous deploys
-try:
-    import shutil as _shutil
-    for _old_dir in UPLOAD_DIR.iterdir():
-        if _old_dir.is_dir():
-            _shutil.rmtree(_old_dir, ignore_errors=True)
-            logger.info("Startup cleanup: removed %s", _old_dir.name)
-except Exception as _e:
-    logger.warning("Startup cleanup failed: %s", _e)
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +83,6 @@ class JobCreateRequest(BaseModel):
     condition_b: str
     n_a: int
     n_b: int
-    genotypes: list[str] = []
-    time_points: list[str] = []
     tissue_type: str = ""
     disease_context: str = ""
     email: str = ""
@@ -583,13 +572,11 @@ async def init_job(
     condition_b: str = Form(...),
     n_a: int = Form(...),
     n_b: int = Form(...),
-    genotypes: str = Form(""),
-    time_points: str = Form(""),
     tissue_type: str = Form(""),
     disease_context: str = Form(""),
     email: str = Form(""),
 ):
-    """Initialize a job without files. Returns job_id for subsequent file uploads."""
+    """Create a job record with metadata only (no files yet)."""
     job_id = str(uuid.uuid4())[:12]
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -603,16 +590,13 @@ async def init_job(
         "n_a": n_a,
         "n_b": n_b,
         "n_samples": n_a + n_b,
-        "genotypes": [g.strip() for g in genotypes.split(",") if g.strip()] if genotypes else [],
-        "time_points": [t.strip() for t in time_points.split(",") if t.strip()] if time_points else [],
         "tissue_type": tissue_type,
         "disease_context": disease_context,
         "email": email,
-        "dataset_size_gb": 0.0,
+        "dataset_size_gb": 0,
         "files": [],
-        "metadata_file": None,
         "status": "uploading",
-        "current_step": None,
+        "current_step": "uploading",
         "steps_completed": [],
         "total_steps": 11,
         "pct_complete": 0,
@@ -624,197 +608,113 @@ async def init_job(
     return {"job_id": job_id, "status": "uploading"}
 
 
-# ---------------------------------------------------------------------------
-# S3 presigned upload
-# ---------------------------------------------------------------------------
-
-S3_UPLOAD_ENABLED = bool(settings.aws_access_key_id and settings.s3_bucket_raw)
-
-
-class PresignedUrlRequest(BaseModel):
-    filename: str
-    content_type: str = "application/gzip"
-    part_count: int = 1  # number of parts for multipart upload
-
-
-@api_app.post("/api/jobs/{job_id}/presign")
-async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
-    """Generate S3 presigned URL(s) for direct browser-to-S3 upload."""
-    if job_id not in _jobs_store:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if not S3_UPLOAD_ENABLED:
-        raise HTTPException(status_code=501, detail="S3 upload not configured")
-
-    from rnascope.infra.aws import _get_s3
-    s3 = _get_s3()
-    bucket = settings.s3_bucket_raw
-    s3_key = f"{job_id}/{req.filename}"
-
-    if req.part_count <= 1:
-        # Single presigned PUT for files < 5GB
-        url = s3.generate_presigned_url(
-            "put_object",
-            Params={"Bucket": bucket, "Key": s3_key, "ContentType": req.content_type},
-            ExpiresIn=3600,
-        )
-        return {"method": "PUT", "url": url, "s3_key": s3_key}
-
-    # Multipart upload for large files (>5GB)
-    mpu = s3.create_multipart_upload(Bucket=bucket, Key=s3_key, ContentType=req.content_type)
-    upload_id = mpu["UploadId"]
-
-    part_urls = []
-    for part_num in range(1, req.part_count + 1):
-        url = s3.generate_presigned_url(
-            "upload_part",
-            Params={"Bucket": bucket, "Key": s3_key, "UploadId": upload_id, "PartNumber": part_num},
-            ExpiresIn=3600,
-        )
-        part_urls.append({"part_number": part_num, "url": url})
-
-    return {"method": "MULTIPART", "upload_id": upload_id, "s3_key": s3_key, "parts": part_urls}
-
-
-class CompleteMultipartRequest(BaseModel):
-    s3_key: str
-    upload_id: str
-    parts: list[dict]  # [{"part_number": 1, "etag": "..."}]
-
-
-@api_app.post("/api/jobs/{job_id}/presign/complete")
-async def complete_multipart(job_id: str, req: CompleteMultipartRequest):
-    """Complete an S3 multipart upload after all parts are uploaded."""
-    if job_id not in _jobs_store:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    from rnascope.infra.aws import _get_s3
-    s3 = _get_s3()
-    bucket = settings.s3_bucket_raw
-
-    s3.complete_multipart_upload(
-        Bucket=bucket,
-        Key=req.s3_key,
-        UploadId=req.upload_id,
-        MultipartUpload={"Parts": [{"PartNumber": p["part_number"], "ETag": p["etag"]} for p in req.parts]},
-    )
-
-    filename = req.s3_key.split("/", 1)[-1]
-    head = s3.head_object(Bucket=bucket, Key=req.s3_key)
-    _register_file(job_id, filename, head["ContentLength"])
-
-    return {"status": "complete", "s3_key": req.s3_key, "size_gb": round(head["ContentLength"] / (1024**3), 2)}
-
-
-@api_app.post("/api/jobs/{job_id}/presign/register")
-async def register_s3_file(job_id: str, filename: str = Form(...), size_bytes: int = Form(0)):
-    """Register a file after single PUT presigned upload completes."""
-    if job_id not in _jobs_store:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    _register_file(job_id, filename, size_bytes)
-
-    return {"status": "registered", "filename": filename, "size_gb": round(size_bytes / (1024**3), 2)}
-
-
-@api_app.get("/api/upload-mode")
-async def get_upload_mode():
-    """Tell the frontend whether S3 direct upload is available."""
-    free_gb = _get_disk_free_gb()
-    return {"s3_enabled": S3_UPLOAD_ENABLED, "max_chunk_mb": 10, "disk_free_gb": round(free_gb, 2)}
-
-
-STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
-_METADATA_EXTS = {".csv", ".tsv", ".txt"}
-
-
-def _is_metadata_file(filename: str) -> bool:
-    return Path(filename).suffix.lower() in _METADATA_EXTS
-
-
-def _register_file(job_id: str, filename: str, size_bytes: int):
-    """Register an uploaded file as metadata or data in the job store."""
-    job = _jobs_store[job_id]
-    if _is_metadata_file(filename):
-        job["metadata_file"] = filename
-    else:
-        if filename not in job["files"]:
-            job["files"].append(filename)
-        job["dataset_size_gb"] = round(job["dataset_size_gb"] + size_bytes / (1024**3), 2)
-
-
 @api_app.post("/api/jobs/{job_id}/upload")
-async def upload_file(
-    job_id: str,
-    file: UploadFile = File(...),
-    chunk_index: int = Form(0),
-    total_chunks: int = Form(1),
-    filename: str = Form(""),
-):
-    """Upload a file chunk. Chunks are appended sequentially and assembled on final chunk."""
+async def upload_file_chunk(job_id: str, request: Request):
+    """Upload a file chunk. Streams to temp disk, then uploads to S3 when complete.
+
+    Query params:
+        filename: original file name
+        chunk_index: 0-based chunk number
+        total_chunks: total number of chunks for this file
+    """
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    free_gb = _get_disk_free_gb()
-    if free_gb < 0.5:
-        raise HTTPException(status_code=507, detail=f"Disk space low ({free_gb:.1f} GB free). Please wait for running jobs to complete or contact support.")
+    filename = request.query_params.get("filename")
+    chunk_index = int(request.query_params.get("chunk_index", 0))
+    total_chunks = int(request.query_params.get("total_chunks", 1))
 
-    real_name = filename or file.filename
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename query param required")
+
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     if total_chunks == 1:
-        # Single-chunk file (small file, no chunking needed)
-        dest = job_dir / real_name
-        file_size = 0
+        # Single-chunk file: stream directly to temp file
+        dest = job_dir / filename
         with open(dest, "wb") as f:
-            while buf := await file.read(STREAM_CHUNK):
-                f.write(buf)
-                file_size += len(buf)
+            async for chunk in request.stream():
+                f.write(chunk)
+        # Upload to S3 and clean up local file
+        await _upload_to_s3_and_cleanup(job_id, filename, dest)
+    else:
+        # Multi-chunk: save chunk to temp dir, reassemble when all chunks arrive
+        chunk_dir = job_dir / f".chunks_{filename}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        chunk_path = chunk_dir / f"{chunk_index:06d}"
+        with open(chunk_path, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
 
-        _register_file(job_id, real_name, file_size)
-        return {"filename": real_name, "chunk": 0, "total_chunks": 1, "status": "complete",
-                "size_mb": round(file_size / (1024**2), 2)}
+        # Check if all chunks have arrived
+        received = len(list(chunk_dir.iterdir()))
+        if received == total_chunks:
+            # Reassemble in order
+            dest = job_dir / filename
+            with open(dest, "wb") as out:
+                for i in range(total_chunks):
+                    cp = chunk_dir / f"{i:06d}"
+                    with open(cp, "rb") as inp:
+                        shutil.copyfileobj(inp, out)
+            # Clean up chunk dir
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            # Upload to S3 and clean up local file
+            await _upload_to_s3_and_cleanup(job_id, filename, dest)
 
-    # Multi-chunk: write chunk to a temp part file
-    chunk_dir = job_dir / f".chunks_{real_name}"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-    chunk_path = chunk_dir / f"part_{chunk_index:05d}"
+    return {"status": "ok", "chunk_index": chunk_index, "filename": filename}
 
-    chunk_size = 0
-    with open(chunk_path, "wb") as f:
-        while buf := await file.read(STREAM_CHUNK):
-            f.write(buf)
-            chunk_size += len(buf)
 
-    # Check if all chunks have arrived
-    received = len(list(chunk_dir.glob("part_*")))
+async def _upload_to_s3_and_cleanup(job_id: str, filename: str, local_path: Path):
+    """Upload a completed file to S3 and remove from local disk."""
+    from rnascope.config import settings as _settings
 
-    if received >= total_chunks:
-        # Reassemble the full file — stream to avoid loading into memory
-        import shutil
-        dest = job_dir / real_name
-        total_size = 0
-        with open(dest, "wb") as out:
-            for i in range(total_chunks):
-                part = chunk_dir / f"part_{i:05d}"
-                total_size += part.stat().st_size
-                with open(part, "rb") as inp:
-                    shutil.copyfileobj(inp, out)
+    s3_key = f"{job_id}/{filename}"
+    file_size = local_path.stat().st_size
 
-        # Clean up chunk dir
-        shutil.rmtree(chunk_dir, ignore_errors=True)
+    try:
+        from rnascope.infra.aws import s3_multipart_upload
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            s3_multipart_upload,
+            _settings.s3_bucket_raw,
+            s3_key,
+            str(local_path),
+            50,  # 50 MB chunks for S3 multipart
+        )
+        logger.info("Uploaded %s to s3://%s/%s", filename, _settings.s3_bucket_raw, s3_key)
+    except Exception as exc:
+        logger.error("S3 upload failed for %s: %s — keeping local copy", filename, exc)
+        # Don't delete local file if S3 upload fails — keep as fallback
+        _update_job_file_list(job_id, filename, file_size)
+        return
 
-        _register_file(job_id, real_name, total_size)
-        return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
-                "status": "complete", "size_mb": round(total_size / (1024**2), 2)}
+    # S3 upload succeeded — remove local file to free disk
+    try:
+        local_path.unlink()
+    except OSError:
+        pass
 
-    return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
-            "status": "uploading", "received": received}
+    _update_job_file_list(job_id, filename, file_size)
+
+
+def _update_job_file_list(job_id: str, filename: str, file_size: int):
+    """Update the job's file list and dataset size."""
+    job = _jobs_store.get(job_id)
+    if not job:
+        return
+    if filename not in job["files"]:
+        job["files"].append(filename)
+    # Track cumulative size
+    job.setdefault("_total_bytes", 0)
+    job["_total_bytes"] += file_size
+    job["dataset_size_gb"] = round(job["_total_bytes"] / (1024**3), 2)
 
 
 @api_app.post("/api/jobs/{job_id}/start")
 async def start_job(job_id: str):
-    """Start the pipeline after all files are uploaded."""
+    """Start the pipeline after all files have been uploaded."""
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -827,74 +727,7 @@ async def start_job(job_id: str):
 
     asyncio.get_event_loop().run_in_executor(None, _simulate_pipeline, job_id)
 
-    return {"job_id": job_id, "status": "running", "files_uploaded": len(job["files"]), "size_gb": job["dataset_size_gb"]}
-
-
-@api_app.post("/api/jobs")
-async def create_job(
-    project_name: str = Form(...),
-    species: str = Form("human"),
-    condition_a: str = Form(...),
-    condition_b: str = Form(...),
-    n_a: int = Form(...),
-    n_b: int = Form(...),
-    genotypes: str = Form(""),
-    time_points: str = Form(""),
-    tissue_type: str = Form(""),
-    disease_context: str = Form(""),
-    email: str = Form(""),
-    files: list[UploadFile] = File(...),
-):
-    """Legacy endpoint — upload files and start job in one request (limited to ~100MB total)."""
-    job_id = str(uuid.uuid4())[:12]
-    job_dir = UPLOAD_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    uploaded_files = []
-    total_size = 0
-    for f in files:
-        dest = job_dir / f.filename
-        file_size = 0
-        with open(dest, "wb") as out:
-            while chunk := await f.read(CHUNK_SIZE):
-                out.write(chunk)
-                file_size += len(chunk)
-        total_size += file_size
-        uploaded_files.append(f.filename)
-
-    size_gb = round(total_size / (1024**3), 2)
-
-    job_state = {
-        "job_id": job_id,
-        "project_name": project_name,
-        "species": species,
-        "condition_a": condition_a,
-        "condition_b": condition_b,
-        "n_a": n_a,
-        "n_b": n_b,
-        "n_samples": n_a + n_b,
-        "genotypes": [g.strip() for g in genotypes.split(",") if g.strip()] if genotypes else [],
-        "time_points": [t.strip() for t in time_points.split(",") if t.strip()] if time_points else [],
-        "tissue_type": tissue_type,
-        "disease_context": disease_context,
-        "email": email,
-        "dataset_size_gb": size_gb,
-        "files": uploaded_files,
-        "status": "running",
-        "current_step": "ingestion",
-        "steps_completed": [],
-        "total_steps": 11,
-        "pct_complete": 0,
-        "cost_so_far_usd": 0.0,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    _jobs_store[job_id] = job_state
-
-    # Start simulated pipeline progress in background
-    asyncio.get_event_loop().run_in_executor(None, _simulate_pipeline, job_id)
-
-    return {"job_id": job_id, "status": "started", "files_uploaded": len(uploaded_files), "size_gb": size_gb}
+    return {"job_id": job_id, "status": "started", "files_uploaded": len(job["files"]), "size_gb": job["dataset_size_gb"]}
 
 
 def _simulate_pipeline(job_id: str):
@@ -959,24 +792,14 @@ def _simulate_pipeline(job_id: str):
             "message": "Pipeline complete! Results are ready.",
         })
 
-        # Clean up uploaded files to free disk space
-        _cleanup_job_uploads(job_id)
-
-
-def _cleanup_job_uploads(job_id: str):
-    """Remove uploaded files after pipeline completes to free disk space."""
-    import shutil
-    job_dir = UPLOAD_DIR / job_id
-    if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
-        logger.info("Cleaned up uploads for job %s", job_id)
-
-
-def _get_disk_free_gb() -> float:
-    """Return free disk space in GB."""
-    import shutil
-    usage = shutil.disk_usage(UPLOAD_DIR)
-    return usage.free / (1024**3)
+        # Auto-cleanup: delete raw FASTQ files from S3 to save storage costs
+        try:
+            from rnascope.config import settings as _settings
+            from rnascope.infra.aws import s3_delete_prefix
+            deleted = s3_delete_prefix(_settings.s3_bucket_raw, f"{job_id}/")
+            logger.info("Auto-cleanup: deleted %d raw files from S3 for job %s", deleted, job_id)
+        except Exception as exc:
+            logger.warning("S3 cleanup failed for job %s: %s", job_id, exc)
 
 
 def _broadcast_sync(job_id: str, message: dict):

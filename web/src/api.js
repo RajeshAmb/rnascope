@@ -1,11 +1,5 @@
 const BASE = ''
 
-export async function createJob(formData) {
-  const res = await fetch(`${BASE}/api/jobs`, { method: 'POST', body: formData })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
 export async function initJob(metadata) {
   const fd = new FormData()
   Object.entries(metadata).forEach(([k, v]) => fd.append(k, v))

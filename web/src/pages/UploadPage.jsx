@@ -1,28 +1,17 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
-import { Upload, FileText, X, Loader2, FlaskConical, Table } from 'lucide-react'
-import { initJob, uploadFile, uploadFileS3, startJob, getUploadMode } from '../api'
+import { Upload, FileText, X, Loader2, FlaskConical } from 'lucide-react'
+import { initJob, uploadFile, startJob } from '../api'
+
+const MAX_PARALLEL_FILES = 3
 
 export default function UploadPage() {
   const navigate = useNavigate()
   const [files, setFiles] = useState([])
   const [submitting, setSubmitting] = useState(false)
-  const [fileProgress, setFileProgress] = useState({}) // { [fileName]: { pct, status } }
-  const [metadataFile, setMetadataFile] = useState(null)
-  const [metadataPreview, setMetadataPreview] = useState(null) // { headers: [], rows: [] }
   const [error, setError] = useState(null)
-  const [useS3, setUseS3] = useState(null) // null = not checked yet
-  const [diskFreeGb, setDiskFreeGb] = useState(null)
-  const MAX_PARALLEL = 3
-
-  // Check if S3 direct upload is available on mount
-  useState(() => {
-    getUploadMode().then((m) => {
-      setUseS3(m.s3_enabled)
-      setDiskFreeGb(m.disk_free_gb)
-    }).catch(() => setUseS3(false))
-  })
+  const [uploadState, setUploadState] = useState(null) // { phase, fileProgress, filesDone, totalFiles }
   const [form, setForm] = useState({
     project_name: '',
     species: 'human',
@@ -31,8 +20,6 @@ export default function UploadPage() {
     condition_b: '',
     n_a: 3,
     n_b: 3,
-    genotypes: '',
-    time_points: '',
     tissue_type: '',
     disease_context: '',
     email: '',
@@ -50,27 +37,6 @@ export default function UploadPage() {
 
   const removeFile = (idx) => setFiles((f) => f.filter((_, i) => i !== idx))
 
-  const handleMetadataFile = (e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setMetadataFile(file)
-    const reader = new FileReader()
-    reader.onload = (evt) => {
-      const text = evt.target.result
-      const lines = text.split(/\r?\n/).filter((l) => l.trim())
-      if (lines.length < 2) { setMetadataPreview(null); return }
-      const headers = lines[0].split(',').map((h) => h.trim())
-      const rows = lines.slice(1, 11).map((line) => line.split(',').map((c) => c.trim()))
-      setMetadataPreview({ headers, rows, totalRows: lines.length - 1 })
-    }
-    reader.readAsText(file)
-  }
-
-  const removeMetadata = () => {
-    setMetadataFile(null)
-    setMetadataPreview(null)
-  }
-
   const setField = (key, val) => setForm((f) => ({ ...f, [key]: val }))
 
   const handleSubmit = async (e) => {
@@ -83,58 +49,52 @@ export default function UploadPage() {
 
     setSubmitting(true)
     setError(null)
-    setFileProgress({})
 
     try {
-      // Step 1: Create job with metadata only
-      const { job_id } = await initJob(form)
+      // Step 1: Init job with metadata only
+      const fd = new FormData()
+      Object.entries(form).forEach(([k, v]) => fd.append(k, v))
+      const { job_id } = await initJob(fd)
 
-      // Step 2a: Upload metadata CSV if provided
-      if (metadataFile) {
-        const uploader = useS3 ? uploadFileS3 : uploadFile
-        setFileProgress((prev) => ({ ...prev, [metadataFile.name]: { pct: 0, status: 'uploading', retry: null } }))
-        await uploader(job_id, metadataFile, (pct) => {
-          setFileProgress((prev) => ({ ...prev, [metadataFile.name]: { pct: Math.round(pct * 100), status: 'uploading', retry: null } }))
-        }, (retryInfo) => {
-          setFileProgress((prev) => ({ ...prev, [metadataFile.name]: { ...prev[metadataFile.name], status: 'retrying', retry: retryInfo } }))
-        })
-        setFileProgress((prev) => ({ ...prev, [metadataFile.name]: { pct: 100, status: 'done', retry: null } }))
-      }
+      // Step 2: Upload files in parallel (up to MAX_PARALLEL_FILES at a time)
+      const fileProgress = {}
+      files.forEach((f) => { fileProgress[f.name] = 0 })
+      setUploadState({ phase: 'uploading', fileProgress: { ...fileProgress }, filesDone: 0, totalFiles: files.length })
 
-      // Step 2b: Upload FASTQ files in parallel (MAX_PARALLEL at a time)
-      const uploader = useS3 ? uploadFileS3 : uploadFile
       const queue = [...files]
+      let filesDone = 0
+
       const uploadNext = async () => {
         while (queue.length > 0) {
           const file = queue.shift()
-          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 0, status: 'uploading', retry: null } }))
-          await uploader(job_id, file, (pct) => {
-            setFileProgress((prev) => ({ ...prev, [file.name]: { pct: Math.round(pct * 100), status: 'uploading', retry: null } }))
-          }, (retryInfo) => {
-            setFileProgress((prev) => ({ ...prev, [file.name]: { ...prev[file.name], status: 'retrying', retry: retryInfo } }))
+          await uploadFile(job_id, file, (pct) => {
+            fileProgress[file.name] = pct
+            setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress } }))
           })
-          setFileProgress((prev) => ({ ...prev, [file.name]: { pct: 100, status: 'done', retry: null } }))
+          filesDone++
+          fileProgress[file.name] = 100
+          setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, filesDone }))
         }
       }
 
-      const workers = Array.from({ length: Math.min(MAX_PARALLEL, files.length) }, () => uploadNext())
+      const workers = Array.from({ length: Math.min(MAX_PARALLEL_FILES, files.length) }, () => uploadNext())
       await Promise.all(workers)
 
-      // Step 3: Start the pipeline
+      // Step 3: Start pipeline
+      setUploadState((s) => ({ ...s, phase: 'starting' }))
       await startJob(job_id)
+
       navigate(`/results/${job_id}`)
     } catch (err) {
       setError(err.message)
     } finally {
       setSubmitting(false)
-      setFileProgress({})
+      setUploadState(null)
     }
   }
 
   const totalSize = files.reduce((s, f) => s + f.size, 0)
-  const sizeDisplay = totalSize >= 1024 * 1024 * 1024
-    ? (totalSize / 1024 / 1024 / 1024).toFixed(2) + ' GB'
-    : (totalSize / 1024 / 1024).toFixed(1) + ' MB'
+  const sizeMB = (totalSize / 1024 / 1024).toFixed(1)
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -170,7 +130,7 @@ export default function UploadPage() {
             <div className="mt-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-gray-700">
-                  {files.length} file{files.length > 1 ? 's' : ''} ({sizeDisplay})
+                  {files.length} file{files.length > 1 ? 's' : ''} ({sizeMB} MB)
                 </span>
                 <button
                   type="button"
@@ -198,58 +158,33 @@ export default function UploadPage() {
           )}
         </div>
 
-        {/* Metadata CSV */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <Table className="w-5 h-5 text-brand-600" />
-            Sample Metadata (CSV)
-          </h2>
-          <p className="text-sm text-gray-500 mb-3">
-            Upload a CSV file with sample information. Expected columns: <span className="font-mono text-xs">sample_id, fastq_r1, fastq_r2, condition, genotype, time_point</span>
-          </p>
-          <div className="flex items-center gap-3">
-            <label className="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition">
-              <Upload className="w-4 h-4" />
-              {metadataFile ? 'Change CSV' : 'Choose CSV file'}
-              <input type="file" accept=".csv,.tsv,.txt" onChange={handleMetadataFile} className="hidden" />
-            </label>
-            {metadataFile && (
-              <div className="flex items-center gap-2 text-sm text-gray-700">
-                <FileText className="w-4 h-4 text-gray-400" />
-                <span className="font-mono">{metadataFile.name}</span>
-                <button type="button" onClick={removeMetadata} className="text-gray-400 hover:text-red-500">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            )}
-          </div>
-
-          {metadataPreview && (
-            <div className="mt-4 border border-gray-200 rounded-lg overflow-x-auto">
-              <table className="min-w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50">
-                    {metadataPreview.headers.map((h, i) => (
-                      <th key={i} className="px-3 py-2 text-left font-semibold text-gray-600 border-b">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {metadataPreview.rows.map((row, ri) => (
-                    <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      {row.map((cell, ci) => (
-                        <td key={ci} className="px-3 py-1.5 text-gray-700 border-b border-gray-100">{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {metadataPreview.totalRows > 10 && (
-                <p className="text-xs text-gray-400 px-3 py-2">Showing 10 of {metadataPreview.totalRows} rows</p>
-              )}
+        {/* Upload progress */}
+        {uploadState && (
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">
+                Uploading {uploadState.filesDone} / {uploadState.totalFiles} files ({MAX_PARALLEL_FILES} parallel)
+              </h2>
+              <span className="text-sm text-gray-500">Server upload</span>
             </div>
-          )}
-        </div>
+            <div className="space-y-3">
+              {Object.entries(uploadState.fileProgress).map(([name, pct]) => (
+                <div key={name}>
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span className="font-mono text-gray-700 truncate">{name}</span>
+                    <span className="text-gray-500 ml-2">{pct}%</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div
+                      className="bg-brand-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Experiment config */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -293,8 +228,6 @@ export default function UploadPage() {
                   <option value="soybean">Soybean — Glycine max (Wm82.a4)</option>
                   <option value="potato">Potato — S. tuberosum (DM v6.1)</option>
                   <option value="grape">Grape — Vitis vinifera (12X.v2)</option>
-                  <option value="cotton">Cotton — Gossypium hirsutum (UTX-TM1)</option>
-                  <option value="cotton_arboreum">Cotton — Gossypium arboreum (CRI v1.0)</option>
                 </optgroup>
                 <optgroup label="Microbiome / Soil / Food">
                   <option value="ecoli">E. coli (K-12 MG1655)</option>
@@ -338,22 +271,22 @@ export default function UploadPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Condition A (Control)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Condition A (Treatment)</label>
               <input
                 type="text"
                 value={form.condition_a}
                 onChange={(e) => setField('condition_a', e.target.value)}
-                placeholder="e.g. Healthy, Untreated, WT"
+                placeholder="e.g. Disease, Treated, KO"
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Condition B (Treatment)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Condition B (Control)</label>
               <input
                 type="text"
                 value={form.condition_b}
                 onChange={(e) => setField('condition_b', e.target.value)}
-                placeholder="e.g. Disease, Treated, KO"
+                placeholder="e.g. Healthy, Untreated, WT"
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
             </div>
@@ -377,29 +310,6 @@ export default function UploadPage() {
                 onChange={(e) => setField('n_b', parseInt(e.target.value) || 1)}
                 className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500"
               />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Genotypes</label>
-              <input
-                type="text"
-                value={form.genotypes}
-                onChange={(e) => setField('genotypes', e.target.value)}
-                placeholder="e.g. Resistant, Susceptible"
-                className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
-              />
-              <p className="text-xs text-gray-400 mt-1">Comma-separated genotype names (optional)</p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Time Points</label>
-              <input
-                type="text"
-                value={form.time_points}
-                onChange={(e) => setField('time_points', e.target.value)}
-                placeholder="e.g. 0DPI, 7DPI, 14DPI, 21DPI"
-                className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
-              />
-              <p className="text-xs text-gray-400 mt-1">Comma-separated time points (optional)</p>
             </div>
 
             <div className="col-span-2">
@@ -426,53 +336,9 @@ export default function UploadPage() {
           </div>
         </div>
 
-        {diskFreeGb !== null && diskFreeGb < 2 && (
-          <div className={`border rounded-lg px-4 py-3 text-sm ${diskFreeGb < 0.5 ? 'bg-red-50 border-red-200 text-red-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
-            Server disk space low: <strong>{diskFreeGb.toFixed(1)} GB</strong> free. {diskFreeGb < 0.5 ? 'Uploads may fail.' : 'Large uploads may not fit.'} {!useS3 && 'Consider enabling S3 for direct uploads.'}
-          </div>
-        )}
-
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
             {error}
-          </div>
-        )}
-
-        {Object.keys(fileProgress).length > 0 && (
-          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 space-y-3">
-            <div className="flex items-center justify-between text-sm font-medium text-blue-800">
-              <span>Uploading {Object.values(fileProgress).filter((f) => f.status === 'done').length} / {Object.keys(fileProgress).length} files ({MAX_PARALLEL} parallel)</span>
-              <span className="text-xs font-normal">{useS3 ? 'Direct to S3' : 'Server upload'}</span>
-            </div>
-            <div className="max-h-48 overflow-y-auto space-y-2">
-              {Object.entries(fileProgress).map(([name, { pct, status, retry }]) => (
-                <div key={name}>
-                  <div className="flex items-center justify-between text-xs text-blue-700 mb-1">
-                    <span className="font-mono truncate max-w-xs">{name}</span>
-                    <span>
-                      {status === 'done' && 'Done'}
-                      {status === 'uploading' && `${pct}%`}
-                      {status === 'retrying' && retry && (
-                        <span className="text-amber-600">
-                          Retry {retry.attempt}/{retry.max} (chunk {retry.chunk}/{retry.totalChunks}) — waiting {Math.round(retry.waitMs / 1000)}s
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  <div className="w-full bg-blue-200 rounded-full h-1.5">
-                    <div
-                      className={`h-1.5 rounded-full transition-all duration-300 ${
-                        status === 'done' ? 'bg-green-500' : status === 'retrying' ? 'bg-amber-500' : 'bg-blue-600'
-                      }`}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  {status === 'retrying' && retry && (
-                    <p className="text-xs text-amber-600 mt-0.5">{retry.error}</p>
-                  )}
-                </div>
-              ))}
-            </div>
           </div>
         )}
 
@@ -484,7 +350,7 @@ export default function UploadPage() {
           {submitting ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin" />
-              {Object.keys(fileProgress).length > 0 ? 'Uploading Files...' : 'Starting Pipeline...'}
+              {uploadState?.phase === 'starting' ? 'Starting Pipeline...' : 'Uploading Files...'}
             </>
           ) : (
             <>

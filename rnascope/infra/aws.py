@@ -59,6 +59,25 @@ def s3_download_json(bucket: str, key: str) -> Any:
     return json.loads(resp["Body"].read())
 
 
+def s3_delete_prefix(bucket: str, prefix: str) -> int:
+    """Delete all objects under a prefix. Returns number of objects deleted."""
+    s3 = _get_s3()
+    objects = s3_list_objects(bucket, prefix)
+    if not objects:
+        return 0
+    # S3 delete_objects accepts max 1000 keys per call
+    deleted = 0
+    for i in range(0, len(objects), 1000):
+        batch = objects[i : i + 1000]
+        s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": o["key"]} for o in batch], "Quiet": True},
+        )
+        deleted += len(batch)
+    logger.info("Deleted %d objects from s3://%s/%s", deleted, bucket, prefix)
+    return deleted
+
+
 def s3_get_dataset_size_gb(bucket: str, prefix: str) -> float:
     objects = s3_list_objects(bucket, prefix)
     total_bytes = sum(o["size"] for o in objects)
