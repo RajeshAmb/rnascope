@@ -630,6 +630,106 @@ def _register_file(job_id: str, filename: str, size_bytes: int):
         job["dataset_size_gb"] = round(job["dataset_size_gb"] + size_bytes / (1024**3), 2)
 
 
+# ---------------------------------------------------------------------------
+# S3 presigned upload (browser → S3 directly, bypasses server)
+# ---------------------------------------------------------------------------
+
+S3_UPLOAD_ENABLED = bool(settings.aws_access_key_id and settings.s3_bucket_raw)
+
+
+class PresignedUrlRequest(BaseModel):
+    filename: str
+    content_type: str = "application/gzip"
+    part_count: int = 1
+
+
+@api_app.get("/api/upload-mode")
+async def get_upload_mode():
+    """Tell the frontend whether S3 direct upload is available."""
+    return {"s3_enabled": S3_UPLOAD_ENABLED, "max_chunk_mb": 10}
+
+
+@api_app.post("/api/jobs/{job_id}/presign")
+async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
+    """Generate S3 presigned URL(s) for direct browser-to-S3 upload."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not S3_UPLOAD_ENABLED:
+        raise HTTPException(status_code=501, detail="S3 upload not configured")
+
+    from rnascope.infra.aws import _get_s3
+    s3 = _get_s3()
+    bucket = settings.s3_bucket_raw
+    s3_key = f"{job_id}/{req.filename}"
+
+    if req.part_count <= 1:
+        url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": s3_key, "ContentType": req.content_type},
+            ExpiresIn=3600,
+        )
+        return {"method": "PUT", "url": url, "s3_key": s3_key}
+
+    # Multipart upload for large files
+    mpu = s3.create_multipart_upload(Bucket=bucket, Key=s3_key, ContentType=req.content_type)
+    upload_id = mpu["UploadId"]
+
+    part_urls = []
+    for part_num in range(1, req.part_count + 1):
+        url = s3.generate_presigned_url(
+            "upload_part",
+            Params={"Bucket": bucket, "Key": s3_key, "UploadId": upload_id, "PartNumber": part_num},
+            ExpiresIn=3600,
+        )
+        part_urls.append({"part_number": part_num, "url": url})
+
+    return {"method": "MULTIPART", "upload_id": upload_id, "s3_key": s3_key, "parts": part_urls}
+
+
+class CompleteMultipartRequest(BaseModel):
+    s3_key: str
+    upload_id: str
+    parts: list[dict]
+
+
+@api_app.post("/api/jobs/{job_id}/presign/complete")
+async def complete_multipart(job_id: str, req: CompleteMultipartRequest):
+    """Complete an S3 multipart upload after all parts are uploaded."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from rnascope.infra.aws import _get_s3
+    s3 = _get_s3()
+    bucket = settings.s3_bucket_raw
+
+    s3.complete_multipart_upload(
+        Bucket=bucket,
+        Key=req.s3_key,
+        UploadId=req.upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": p["part_number"], "ETag": p["etag"]} for p in req.parts]},
+    )
+
+    filename = req.s3_key.split("/", 1)[-1]
+    head = s3.head_object(Bucket=bucket, Key=req.s3_key)
+    _register_file(job_id, filename, head["ContentLength"])
+
+    return {"status": "complete", "s3_key": req.s3_key}
+
+
+@api_app.post("/api/jobs/{job_id}/presign/register")
+async def register_s3_file(job_id: str, filename: str = Form(...), size_bytes: int = Form(0)):
+    """Register a file after single PUT presigned upload completes."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    _register_file(job_id, filename, size_bytes)
+    return {"status": "registered", "filename": filename}
+
+
+# ---------------------------------------------------------------------------
+# Fallback chunked upload (browser → server → disk/S3)
+# ---------------------------------------------------------------------------
+
 @api_app.post("/api/jobs/{job_id}/upload")
 async def upload_file(
     job_id: str,

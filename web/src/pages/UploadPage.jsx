@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, X, Loader2, FlaskConical } from 'lucide-react'
-import { initJob, uploadFile, startJob } from '../api'
+import { initJob, uploadFile, uploadFileS3, startJob, getUploadMode } from '../api'
 
 const MAX_PARALLEL_FILES = 3
 
@@ -12,6 +12,13 @@ export default function UploadPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
   const [uploadState, setUploadState] = useState(null) // { phase, fileProgress, filesDone, totalFiles }
+  const [useS3, setUseS3] = useState(null)
+
+  // Check if S3 direct upload is available on mount
+  useState(() => {
+    getUploadMode().then((m) => setUseS3(m.s3_enabled)).catch(() => setUseS3(false))
+  })
+
   const [form, setForm] = useState({
     project_name: '',
     species: 'human',
@@ -64,10 +71,11 @@ export default function UploadPage() {
       const queue = [...files]
       let filesDone = 0
 
+      const uploader = useS3 ? uploadFileS3 : uploadFile
       const uploadNext = async () => {
         while (queue.length > 0) {
           const file = queue.shift()
-          await uploadFile(job_id, file, (fraction) => {
+          await uploader(job_id, file, (fraction) => {
             fileProgress[file.name] = Math.round(fraction * 100)
             setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress } }))
           })
