@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
-import { Upload, FileText, X, Loader2, FlaskConical } from 'lucide-react'
+import { Upload, FileText, X, Loader2, FlaskConical, Table } from 'lucide-react'
 import { initJob, uploadFile, uploadFileS3, startJob, getUploadMode } from '../api'
 
 const MAX_PARALLEL_FILES = 3
@@ -11,6 +11,8 @@ export default function UploadPage() {
   const [files, setFiles] = useState([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+  const [metadataFile, setMetadataFile] = useState(null)
+  const [metadataPreview, setMetadataPreview] = useState(null)
   const [uploadState, setUploadState] = useState(null) // { phase, fileProgress, filesDone, totalFiles }
   const [useS3, setUseS3] = useState(null)
 
@@ -44,6 +46,27 @@ export default function UploadPage() {
 
   const removeFile = (idx) => setFiles((f) => f.filter((_, i) => i !== idx))
 
+  const handleMetadataFile = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setMetadataFile(file)
+    const reader = new FileReader()
+    reader.onload = (evt) => {
+      const text = evt.target.result
+      const lines = text.split(/\r?\n/).filter((l) => l.trim())
+      if (lines.length < 2) { setMetadataPreview(null); return }
+      const headers = lines[0].split(',').map((h) => h.trim())
+      const rows = lines.slice(1, 6).map((line) => line.split(',').map((c) => c.trim()))
+      setMetadataPreview({ headers, rows, totalRows: lines.length - 1 })
+    }
+    reader.readAsText(file)
+  }
+
+  const removeMetadata = () => {
+    setMetadataFile(null)
+    setMetadataPreview(null)
+  }
+
   const setField = (key, val) => setForm((f) => ({ ...f, [key]: val }))
 
   const handleSubmit = async (e) => {
@@ -63,7 +86,13 @@ export default function UploadPage() {
       Object.entries(form).forEach(([k, v]) => fd.append(k, v))
       const { job_id } = await initJob(fd)
 
-      // Step 2: Upload files in parallel (up to MAX_PARALLEL_FILES at a time)
+      // Step 2a: Upload metadata CSV if provided
+      if (metadataFile) {
+        const metaUploader = useS3 ? uploadFileS3 : uploadFile
+        await metaUploader(job_id, metadataFile)
+      }
+
+      // Step 2b: Upload FASTQ files in parallel (up to MAX_PARALLEL_FILES at a time)
       const fileProgress = {}
       files.forEach((f) => { fileProgress[f.name] = 0 })
       setUploadState({ phase: 'uploading', fileProgress: { ...fileProgress }, filesDone: 0, totalFiles: files.length })
@@ -162,6 +191,58 @@ export default function UploadPage() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Metadata CSV */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <h2 className="text-lg font-semibold mb-2">Sample Metadata (optional)</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Upload a CSV with sample info (sample_id, condition, genotype, replicate, etc.)
+          </p>
+          {!metadataFile ? (
+            <label className="flex items-center gap-3 border-2 border-dashed border-gray-300 rounded-lg px-4 py-3 cursor-pointer hover:border-brand-400 hover:bg-gray-50 transition">
+              <Table className="w-5 h-5 text-gray-400" />
+              <span className="text-sm text-gray-600">Click to upload .csv file</span>
+              <input type="file" accept=".csv,.tsv,.txt" className="hidden" onChange={handleMetadataFile} />
+            </label>
+          ) : (
+            <div>
+              <div className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2 text-sm mb-3">
+                <div className="flex items-center gap-2">
+                  <Table className="w-4 h-4 text-brand-600" />
+                  <span className="font-mono text-gray-800">{metadataFile.name}</span>
+                </div>
+                <button type="button" onClick={removeMetadata} className="text-gray-400 hover:text-red-500">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              {metadataPreview && (
+                <div className="overflow-x-auto">
+                  <table className="text-xs border-collapse w-full">
+                    <thead>
+                      <tr>
+                        {metadataPreview.headers.map((h, i) => (
+                          <th key={i} className="border border-gray-200 bg-gray-100 px-2 py-1 text-left font-medium">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metadataPreview.rows.map((row, ri) => (
+                        <tr key={ri}>
+                          {row.map((cell, ci) => (
+                            <td key={ci} className="border border-gray-200 px-2 py-1">{cell}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {metadataPreview.totalRows > 5 && (
+                    <p className="text-xs text-gray-400 mt-1">Showing 5 of {metadataPreview.totalRows} rows</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
