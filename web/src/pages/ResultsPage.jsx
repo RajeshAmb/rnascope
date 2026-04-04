@@ -18,17 +18,24 @@ import WGCNAPlot from '../components/charts/WGCNAPlot'
 import DeconvolutionPlot from '../components/charts/DeconvolutionPlot'
 import VennDiagram from '../components/charts/VennDiagram'
 import TreatmentHeatmap from '../components/charts/TreatmentHeatmap'
+import { BaseQualityPlot, GCContentPlot, AdapterContentPlot } from '../components/charts/FastQCPlots'
+import { MappingRatePlot, ReadDistributionPlot, GeneBodyCoveragePlot } from '../components/charts/AlignmentPlots'
+import { ExpressionBoxplot, ExpressionDensity, CorrelationHeatmap } from '../components/charts/ExpressionPlots'
+import { MAPlot, DispersionPlot, TimeSeriesPlot } from '../components/charts/DEGAdvancedPlots'
 import { Loader2, Lightbulb, FlaskConical, BookOpen, Download } from 'lucide-react'
 
-const TABS = [
+const ALL_TABS = [
   { key: 'overview', label: 'Overview' },
-  { key: 'qc', label: 'QC' },
+  { key: 'fastqc', label: 'FastQC' },
+  { key: 'alignment', label: 'Alignment' },
+  { key: 'expression', label: 'Expression' },
+  { key: 'qc', label: 'QC Summary' },
   { key: 'deg', label: 'DEG' },
   { key: 'transcripts', label: 'Transcripts' },
   { key: 'annotation', label: 'Annotation' },
   { key: 'pathway', label: 'Pathways' },
   { key: 'wgcna', label: 'Network' },
-  { key: 'deconv', label: 'Cell Types' },
+  { key: 'deconv', label: 'Cell Types', domains: ['animal'] },
   { key: 'interpretation', label: 'AI' },
 ]
 
@@ -188,6 +195,18 @@ export default function ResultsPage() {
   const deconvRef = useRef(null)
   const vennRef = useRef(null)
   const treatmentHeatmapRef = useRef(null)
+  const baseQualRef = useRef(null)
+  const gcRef = useRef(null)
+  const adapterRef = useRef(null)
+  const mappingRef = useRef(null)
+  const readDistRef = useRef(null)
+  const geneBodyRef = useRef(null)
+  const exprBoxRef = useRef(null)
+  const exprDensRef = useRef(null)
+  const corrRef = useRef(null)
+  const maRef = useRef(null)
+  const dispRef = useRef(null)
+  const timeSeriesRef = useRef(null)
 
   useEffect(() => {
     const load = async () => {
@@ -284,7 +303,7 @@ export default function ResultsPage() {
       {results && (
         <>
           <div className="flex gap-1 mb-6 bg-white rounded-xl border border-gray-200 p-1 shadow-sm">
-            {TABS.map((tab) => (
+            {ALL_TABS.filter((tab) => !tab.domains || tab.domains.includes(results.domain || 'animal')).map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
@@ -330,7 +349,58 @@ export default function ResultsPage() {
             </div>
           )}
 
-          {/* ============ QC TAB ============ */}
+          {/* ============ FASTQC TAB ============ */}
+          {activeTab === 'fastqc' && results.fastqc && (
+            <div className="space-y-6">
+              <ChartCard title="Per Base Sequence Quality" plotRef={baseQualRef}>
+                <BaseQualityPlot ref={baseQualRef} data={results.fastqc.base_quality} />
+              </ChartCard>
+              <ChartCard title="GC Content Distribution" plotRef={gcRef}>
+                <GCContentPlot ref={gcRef} data={results.fastqc.gc_content} />
+              </ChartCard>
+              <ChartCard title="Adapter Content" plotRef={adapterRef}>
+                <AdapterContentPlot ref={adapterRef} data={results.fastqc.adapter_content} />
+              </ChartCard>
+            </div>
+          )}
+
+          {/* ============ ALIGNMENT TAB ============ */}
+          {activeTab === 'alignment' && results.alignment && (
+            <div className="space-y-6">
+              <ChartCard title="Mapping Rate" plotRef={mappingRef}>
+                <MappingRatePlot ref={mappingRef} data={results.alignment.mapping_rate} />
+              </ChartCard>
+              <ChartCard title="Read Distribution" plotRef={readDistRef}>
+                <ReadDistributionPlot ref={readDistRef} data={results.alignment.read_distribution} />
+              </ChartCard>
+              <ChartCard title="Gene Body Coverage" plotRef={geneBodyRef}>
+                <GeneBodyCoveragePlot ref={geneBodyRef} data={results.alignment.gene_body_coverage} />
+              </ChartCard>
+            </div>
+          )}
+
+          {/* ============ EXPRESSION TAB ============ */}
+          {activeTab === 'expression' && (
+            <div className="space-y-6">
+              {results.expression_dist && (
+                <ChartCard title="Expression Distribution (Boxplot)" plotRef={exprBoxRef}>
+                  <ExpressionBoxplot ref={exprBoxRef} data={results.expression_dist} />
+                </ChartCard>
+              )}
+              {results.expression_dist && (
+                <ChartCard title="Expression Density" plotRef={exprDensRef}>
+                  <ExpressionDensity ref={exprDensRef} data={results.expression_dist} />
+                </ChartCard>
+              )}
+              {results.correlation && (
+                <ChartCard title="Sample Correlation Heatmap" plotRef={corrRef}>
+                  <CorrelationHeatmap ref={corrRef} data={results.correlation} />
+                </ChartCard>
+              )}
+            </div>
+          )}
+
+          {/* ============ QC SUMMARY TAB ============ */}
           {activeTab === 'qc' && (
             <ChartCard title="Quality Control Metrics" csvData={qcCSV(results.qc_summary)}>
               <QCSummary data={results.qc_summary} />
@@ -354,9 +424,24 @@ export default function ResultsPage() {
                   <VennDiagram ref={vennRef} data={results.venn} />
                 </ChartCard>
               )}
+              {results.ma_plot && (
+                <ChartCard title="MA Plot" plotRef={maRef}>
+                  <MAPlot ref={maRef} data={results.ma_plot} />
+                </ChartCard>
+              )}
+              {results.dispersion && (
+                <ChartCard title="Dispersion Estimates" plotRef={dispRef}>
+                  <DispersionPlot ref={dispRef} data={results.dispersion} />
+                </ChartCard>
+              )}
               {results.treatment_heatmap && (
                 <ChartCard title="Treatment-wise Expression Profiles" plotRef={treatmentHeatmapRef}>
                   <TreatmentHeatmap ref={treatmentHeatmapRef} data={results.treatment_heatmap} />
+                </ChartCard>
+              )}
+              {results.time_series && (
+                <ChartCard title="Time-Series Expression" plotRef={timeSeriesRef}>
+                  <TimeSeriesPlot ref={timeSeriesRef} data={results.time_series} />
                 </ChartCard>
               )}
             </div>

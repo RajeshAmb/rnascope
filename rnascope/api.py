@@ -173,6 +173,28 @@ _SPECIES_GENES = {
         "TUP1", "GAL4", "GCN4", "HAP4", "MSN2", "MSN4", "HSF1",
         "YAP1", "SKN7", "SOD1",
     ],
+    "cotton": [
+        "GhPR1", "GhPR5", "GhNPR1", "GhWRKY40", "GhWRKY70", "GhERF1",
+        "GhMYB36", "GhJAZ1", "GhPAL", "GhCHS", "GhF3H", "GhDFR",
+        "GhCAD", "GhCCoAOMT", "GhCOMT", "GhLAC", "GhPOD", "GhSOD",
+        "GhCAT", "GhAPX", "GhGST", "GhHSP70", "GhHSP90", "GhLEA",
+        "GhRD22", "GhNAC", "GhDREB", "GhP5CS", "GhNHX1", "GhSOS1",
+        "GhSWEET", "GhSUT", "GhINV", "GhSUS", "GhCesA", "GhExpA",
+        "GhXTH", "GhPME", "GhPG", "GhGhPEL", "GhMYB109", "GhMYB25",
+        "GhHD1", "GhACO", "GhACS", "GhETR", "GhEIN2", "GhCTR1",
+        "GhGID1", "GhDELLA", "GhARF", "GhAux/IAA",
+    ],
+    "cotton_arboreum": [
+        "GaPR1", "GaPR5", "GaNPR1", "GaWRKY40", "GaWRKY70", "GaERF1",
+        "GaMYB36", "GaJAZ1", "GaPAL", "GaCHS", "GaF3H", "GaDFR",
+        "GaCAD", "GaCCoAOMT", "GaCOMT", "GaLAC", "GaPOD", "GaSOD",
+        "GaCAT", "GaAPX", "GaGST", "GaHSP70", "GaHSP90", "GaLEA",
+        "GaRD22", "GaNAC", "GaDREB", "GaP5CS", "GaNHX1", "GaSOS1",
+        "GaSWEET", "GaSUT", "GaINV", "GaSUS", "GaCesA", "GaExpA",
+        "GaXTH", "GaPME", "GaPG", "GaPEL", "GaMYB109", "GaMYB25",
+        "GaHD1", "GaACO", "GaACS", "GaETR", "GaEIN2", "GaCTR1",
+        "GaGID1", "GaDELLA", "GaARF", "GaAux/IAA",
+    ],
 }
 
 _SPECIES_GO_TERMS = {
@@ -265,7 +287,7 @@ _SPECIES_KEGG = {
 
 def _get_domain(species: str) -> str:
     """Get domain category for a species."""
-    plants = {"arabidopsis", "rice", "maize", "wheat", "tomato", "soybean", "potato", "grape"}
+    plants = {"arabidopsis", "rice", "maize", "wheat", "tomato", "soybean", "potato", "grape", "cotton", "cotton_arboreum"}
     microbes = {"ecoli", "yeast", "aspergillus", "lactobacillus", "metatranscriptome"}
     if species in plants:
         return "plant"
@@ -544,6 +566,124 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "method": "xCell",
     }
 
+    # --------------- FastQC data ---------------
+    read_len = 150
+    positions = list(range(1, read_len + 1))
+    fastqc_data = {
+        "base_quality": {
+            "positions": positions,
+            "mean_quality": [round(random.gauss(36 if p < 130 else 33, 1.2), 1) for p in positions],
+            "q1": [round(random.gauss(32 if p < 130 else 28, 1.5), 1) for p in positions],
+            "q3": [round(random.gauss(38 if p < 130 else 35, 0.8), 1) for p in positions],
+            "lower_whisker": [round(random.gauss(28 if p < 130 else 22, 2), 1) for p in positions],
+            "upper_whisker": [round(random.gauss(40, 0.5), 1) for p in positions],
+        },
+        "gc_content": {
+            "gc_pct": list(range(0, 101)),
+            "count": [round(max(0, 5000 * math.exp(-0.5 * ((x - 42) / 10) ** 2) + random.gauss(0, 100))) for x in range(101)],
+            "theoretical": [round(5000 * math.exp(-0.5 * ((x - 42) / 10) ** 2)) for x in range(101)],
+        },
+        "adapter_content": {
+            "positions": positions,
+            "illumina_universal": [round(max(0, 0.002 * p + random.gauss(0, 0.1)), 2) for p in positions],
+            "illumina_small_rna": [round(max(0, 0.001 * p + random.gauss(0, 0.05)), 2) for p in positions],
+            "nextera": [round(max(0, 0.0005 * p + random.gauss(0, 0.03)), 2) for p in positions],
+        },
+    }
+
+    # --------------- Alignment/Mapping data ---------------
+    sample_names_full = [f"{condition_a}_rep{i+1}" for i in range(n_a)] + [f"{condition_b}_rep{i+1}" for i in range(n_b)]
+    alignment_data = {
+        "mapping_rate": {
+            "samples": sample_names_full,
+            "mapped": [round(random.uniform(28, 42), 1) for _ in range(n_samples)],
+            "unmapped": [round(random.uniform(2, 6), 1) for _ in range(n_samples)],
+        },
+        "read_distribution": {
+            "samples": sample_names_full,
+            "exonic": [round(random.uniform(55, 75), 1) for _ in range(n_samples)],
+            "intronic": [round(random.uniform(15, 30), 1) for _ in range(n_samples)],
+            "intergenic": [round(random.uniform(5, 15), 1) for _ in range(n_samples)],
+        },
+        "gene_body_coverage": {
+            "percentile": list(range(0, 101, 5)),
+            "samples": [
+                {"name": s, "coverage": [round(random.gauss(0.8 + 0.2 * math.sin(math.pi * p / 100), 0.08), 3) for p in range(0, 101, 5)]}
+                for s in sample_names_full
+            ],
+        },
+    }
+
+    # --------------- Expression distribution data ---------------
+    expression_dist = {
+        "samples": [
+            {"name": s, "values": [round(random.gauss(4.5, 2.5), 2) for _ in range(200)]}
+            for s in sample_names_full
+        ],
+    }
+
+    # --------------- Correlation heatmap ---------------
+    corr_matrix = []
+    for i in range(n_samples):
+        row = []
+        for j in range(n_samples):
+            if i == j:
+                row.append(1.0)
+            else:
+                # Same condition = higher correlation
+                same_cond = (i < n_a and j < n_a) or (i >= n_a and j >= n_a)
+                r = round(random.uniform(0.92, 0.98) if same_cond else random.uniform(0.78, 0.88), 3)
+                row.append(r)
+        corr_matrix.append(row)
+    # Make symmetric
+    for i in range(n_samples):
+        for j in range(i + 1, n_samples):
+            corr_matrix[j][i] = corr_matrix[i][j]
+    correlation_data = {
+        "samples": sample_names_full,
+        "matrix": corr_matrix,
+        "min": 0.75,
+    }
+
+    # --------------- MA Plot data ---------------
+    ma_data = []
+    for g in volcano_data:
+        mean_expr = round(10 ** random.uniform(0.5, 4.5), 1)
+        ma_data.append({
+            "gene": g["gene"],
+            "mean_expression": mean_expr,
+            "log2fc": g["log2fc"],
+            "significant": g["significant"],
+        })
+
+    # --------------- Dispersion data ---------------
+    n_disp = 200
+    mean_counts_disp = [round(10 ** random.uniform(0.5, 4.5), 1) for _ in range(n_disp)]
+    mean_counts_disp.sort()
+    dispersion_data = {
+        "mean_counts": mean_counts_disp,
+        "gene_est": [round(10 ** random.gauss(-1.5, 0.8), 4) for _ in range(n_disp)],
+        "fitted": [round(0.5 / (mc ** 0.5) + 0.01, 4) for mc in mean_counts_disp],
+        "final_est": [round(max(0.001, 0.5 / (mc ** 0.5) + 0.01 + random.gauss(0, 0.02)), 4) for mc in mean_counts_disp],
+    }
+
+    # --------------- Time-series data (for DPI experiments) ---------------
+    time_points = [0, 7, 14, 21, 28]
+    top_time_genes = [g["gene"] for g in sorted(volcano_data, key=lambda x: -abs(x["log2fc"])) if g["significant"]][:8]
+    time_series_data = {
+        "time_points": time_points,
+        "x_label": "Days Post Inoculation (DPI)",
+        "title": "Gene Expression Over Time (Top DEGs)",
+        "genes": [
+            {
+                "gene": gene,
+                "values": [round(random.gauss(2 + idx * 0.3, 0.5) + t * random.uniform(-0.05, 0.15), 2) for t in time_points],
+                "se": [round(random.uniform(0.2, 0.6), 2) for _ in time_points],
+            }
+            for idx, gene in enumerate(top_time_genes)
+        ],
+    }
+
     # Venn diagram data — up-regulated DEGs split into condition-specific sets
     up_genes = [g["gene"] for g in volcano_data if g["direction"] == "up"]
     down_genes = [g["gene"] for g in volcano_data if g["direction"] == "down"]
@@ -579,6 +719,8 @@ def _generate_demo_results(job_id: str, species: str = "human",
     }
 
     return {
+        "domain": domain,
+        "species": species,
         "volcano": volcano_data,
         "pca": pca_data,
         "heatmap": heatmap_data,
@@ -590,9 +732,16 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "interpretation": interpretation,
         "transcripts": transcript_data,
         "wgcna": wgcna_data,
-        "deconvolution": deconv_data,
+        "deconvolution": domain == "animal" and deconv_data or None,
         "venn": venn_data,
         "treatment_heatmap": treatment_heatmap,
+        "fastqc": fastqc_data,
+        "alignment": alignment_data,
+        "expression_dist": expression_dist,
+        "correlation": correlation_data,
+        "ma_plot": ma_data,
+        "dispersion": dispersion_data,
+        "time_series": time_series_data,
     }
 
 
