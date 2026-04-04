@@ -1,8 +1,14 @@
 const BASE = ''
 
 export async function initJob(metadata) {
-  const fd = new FormData()
-  Object.entries(metadata).forEach(([k, v]) => fd.append(k, v))
+  // Accept either a FormData or plain object
+  let fd
+  if (metadata instanceof FormData) {
+    fd = metadata
+  } else {
+    fd = new FormData()
+    Object.entries(metadata).forEach(([k, v]) => fd.append(k, v))
+  }
   const res = await fetch(`${BASE}/api/jobs/init`, { method: 'POST', body: fd })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
