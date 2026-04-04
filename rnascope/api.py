@@ -608,69 +608,97 @@ async def init_job(
     return {"job_id": job_id, "status": "uploading"}
 
 
-@api_app.post("/api/jobs/{job_id}/upload")
-async def upload_file_chunk(job_id: str, request: Request):
-    """Upload a file chunk. Streams to temp disk, then uploads to S3 when complete.
+STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
+_METADATA_EXTS = {".csv", ".tsv", ".txt"}
 
-    Query params:
-        filename: original file name
-        chunk_index: 0-based chunk number
-        total_chunks: total number of chunks for this file
-    """
+
+def _is_metadata_file(filename: str) -> bool:
+    return Path(filename).suffix.lower() in _METADATA_EXTS
+
+
+def _register_file(job_id: str, filename: str, size_bytes: int):
+    """Register an uploaded file as metadata or data in the job store."""
+    job = _jobs_store[job_id]
+    if _is_metadata_file(filename):
+        job["metadata_file"] = filename
+    else:
+        if filename not in job["files"]:
+            job["files"].append(filename)
+        job["dataset_size_gb"] = round(job["dataset_size_gb"] + size_bytes / (1024**3), 2)
+
+
+@api_app.post("/api/jobs/{job_id}/upload")
+async def upload_file(
+    job_id: str,
+    file: UploadFile = File(...),
+    chunk_index: int = Form(0),
+    total_chunks: int = Form(1),
+    filename: str = Form(""),
+):
+    """Upload a file chunk. Chunks are written to disk and assembled on final chunk."""
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    filename = request.query_params.get("filename")
-    chunk_index = int(request.query_params.get("chunk_index", 0))
-    total_chunks = int(request.query_params.get("total_chunks", 1))
-
-    if not filename:
-        raise HTTPException(status_code=400, detail="filename query param required")
-
+    real_name = filename or file.filename
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     if total_chunks == 1:
-        # Single-chunk file: stream directly to temp file
-        dest = job_dir / filename
+        # Single-chunk file
+        dest = job_dir / real_name
+        file_size = 0
         with open(dest, "wb") as f:
-            async for chunk in request.stream():
-                f.write(chunk)
+            while buf := await file.read(STREAM_CHUNK):
+                f.write(buf)
+                file_size += len(buf)
+
         # Upload to S3 and clean up local file
-        await _upload_to_s3_and_cleanup(job_id, filename, dest)
-    else:
-        # Multi-chunk: save chunk to temp dir, reassemble when all chunks arrive
-        chunk_dir = job_dir / f".chunks_{filename}"
-        chunk_dir.mkdir(parents=True, exist_ok=True)
-        chunk_path = chunk_dir / f"{chunk_index:06d}"
-        with open(chunk_path, "wb") as f:
-            async for chunk in request.stream():
-                f.write(chunk)
+        await _upload_to_s3_and_cleanup(job_id, real_name, dest, file_size)
+        return {"filename": real_name, "chunk": 0, "total_chunks": 1, "status": "complete",
+                "size_mb": round(file_size / (1024**2), 2)}
 
-        # Check if all chunks have arrived
-        received = len(list(chunk_dir.iterdir()))
-        if received == total_chunks:
-            # Reassemble in order
-            dest = job_dir / filename
-            with open(dest, "wb") as out:
-                for i in range(total_chunks):
-                    cp = chunk_dir / f"{i:06d}"
-                    with open(cp, "rb") as inp:
-                        shutil.copyfileobj(inp, out)
-            # Clean up chunk dir
-            shutil.rmtree(chunk_dir, ignore_errors=True)
-            # Upload to S3 and clean up local file
-            await _upload_to_s3_and_cleanup(job_id, filename, dest)
+    # Multi-chunk: write chunk to a temp part file
+    chunk_dir = job_dir / f".chunks_{real_name}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = chunk_dir / f"part_{chunk_index:05d}"
 
-    return {"status": "ok", "chunk_index": chunk_index, "filename": filename}
+    chunk_size = 0
+    with open(chunk_path, "wb") as f:
+        while buf := await file.read(STREAM_CHUNK):
+            f.write(buf)
+            chunk_size += len(buf)
+
+    # Check if all chunks have arrived
+    received = len(list(chunk_dir.glob("part_*")))
+
+    if received >= total_chunks:
+        # Reassemble the full file
+        dest = job_dir / real_name
+        total_size = 0
+        with open(dest, "wb") as out:
+            for i in range(total_chunks):
+                part = chunk_dir / f"part_{i:05d}"
+                total_size += part.stat().st_size
+                with open(part, "rb") as inp:
+                    shutil.copyfileobj(inp, out)
+
+        # Clean up chunk dir
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+
+        # Upload to S3 and clean up local file
+        await _upload_to_s3_and_cleanup(job_id, real_name, dest, total_size)
+        return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
+                "status": "complete", "size_mb": round(total_size / (1024**2), 2)}
+
+    return {"filename": real_name, "chunk": chunk_index, "total_chunks": total_chunks,
+            "status": "uploading", "received": received}
 
 
-async def _upload_to_s3_and_cleanup(job_id: str, filename: str, local_path: Path):
-    """Upload a completed file to S3 and remove from local disk."""
+async def _upload_to_s3_and_cleanup(job_id: str, filename: str, local_path: Path, file_size: int):
+    """Upload a completed file to S3, register it, and remove from local disk."""
     from rnascope.config import settings as _settings
 
     s3_key = f"{job_id}/{filename}"
-    file_size = local_path.stat().st_size
 
     try:
         from rnascope.infra.aws import s3_multipart_upload
@@ -686,8 +714,7 @@ async def _upload_to_s3_and_cleanup(job_id: str, filename: str, local_path: Path
         logger.info("Uploaded %s to s3://%s/%s", filename, _settings.s3_bucket_raw, s3_key)
     except Exception as exc:
         logger.error("S3 upload failed for %s: %s — keeping local copy", filename, exc)
-        # Don't delete local file if S3 upload fails — keep as fallback
-        _update_job_file_list(job_id, filename, file_size)
+        _register_file(job_id, filename, file_size)
         return
 
     # S3 upload succeeded — remove local file to free disk
@@ -696,20 +723,7 @@ async def _upload_to_s3_and_cleanup(job_id: str, filename: str, local_path: Path
     except OSError:
         pass
 
-    _update_job_file_list(job_id, filename, file_size)
-
-
-def _update_job_file_list(job_id: str, filename: str, file_size: int):
-    """Update the job's file list and dataset size."""
-    job = _jobs_store.get(job_id)
-    if not job:
-        return
-    if filename not in job["files"]:
-        job["files"].append(filename)
-    # Track cumulative size
-    job.setdefault("_total_bytes", 0)
-    job["_total_bytes"] += file_size
-    job["dataset_size_gb"] = round(job["_total_bytes"] / (1024**3), 2)
+    _register_file(job_id, filename, file_size)
 
 
 @api_app.post("/api/jobs/{job_id}/start")
