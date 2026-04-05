@@ -150,7 +150,7 @@ export async function getUploadMode() {
 // ---------------------------------------------------------------------------
 // S3 direct upload — resumable multipart with localStorage tracking
 // ---------------------------------------------------------------------------
-const S3_PART_SIZE = 2 * 1024 * 1024 // 2 MB per part — small enough to finish before idle timeout
+const S3_PART_SIZE = 50 * 1024 * 1024 // 50 MB per part — required for 60GB+ files (max 10,000 parts)
 
 function uploadS3Part(url, chunk, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -164,8 +164,14 @@ function uploadS3Part(url, chunk, timeoutMs) {
         reject(new Error(`S3 part failed (${xhr.status})`))
       }
     }
-    xhr.onerror = () => reject(new Error('Network error'))
-    xhr.ontimeout = () => reject(new Error('Timed out'))
+    xhr.onerror = () => {
+      console.error(`S3 Network Error: ${url}`)
+      reject(new Error('Network error'))
+    }
+    xhr.ontimeout = () => {
+      console.error(`S3 Timeout: ${url}`)
+      reject(new Error('Timed out'))
+    }
     xhr.send(chunk)
   })
 }
@@ -252,7 +258,7 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
       const etag = await withRetry(() => {
         partProgress[i] = 0
         const chunk = file.slice(start, end)
-        return uploadS3Part(partInfo.url, chunk, 60000) // 60s timeout for 2MB
+        return uploadS3Part(partInfo.url, chunk, 180000) // 3 min timeout for 50MB
       }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
         if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
       })

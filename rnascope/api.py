@@ -59,20 +59,54 @@ class _PersistentJobStore:
     def __contains__(self, job_id: str) -> bool:
         return self._path(job_id).exists()
 
-    def __setitem__(self, job_id: str, state: dict):
-        self._path(job_id).write_text(json.dumps(state), encoding="utf-8")
-
-    def __getitem__(self, job_id: str) -> dict:
-        p = self._path(job_id)
-        if not p.exists():
-            raise KeyError(job_id)
-        return json.loads(p.read_text(encoding="utf-8"))
-
     def get(self, job_id: str, default=None):
         try:
             return self[job_id]
         except KeyError:
+            # Fallback to Redis for recovery
+            try:
+                from rnascope.infra.checkpoint import get_job_state
+                state = get_job_state(job_id)
+                if state:
+                    self[job_id] = state # Restore to local disk
+                    return state
+            except Exception:
+                pass
             return default
+
+    def __getitem__(self, job_id: str) -> dict:
+        p = self._path(job_id)
+        if not p.exists():
+            # Check Redis before failing
+            try:
+                from rnascope.infra.checkpoint import get_job_state
+                state = get_job_state(job_id)
+                if state:
+                    self[job_id] = state # Restore to local disk
+                    return state
+            except Exception:
+                pass
+            raise KeyError(job_id)
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def __setitem__(self, job_id: str, state: dict):
+        self._path(job_id).write_text(json.dumps(state), encoding="utf-8")
+        # Sync to Redis for persistence across restarts/workers
+        try:
+            from rnascope.infra.checkpoint import save_job_state
+            save_job_state(job_id, state)
+        except Exception as e:
+            logger.warning("Failed to sync job %s to Redis: %s", job_id, e)
+
+    def __contains__(self, job_id: str) -> bool:
+        if self._path(job_id).exists():
+            return True
+        # Check Redis
+        try:
+            from rnascope.infra.checkpoint import get_job_state
+            return get_job_state(job_id) is not None
+        except Exception:
+            return False
 
     def items(self):
         for p in self._dir.glob("*.json"):
@@ -895,7 +929,7 @@ async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
         url = s3.generate_presigned_url(
             "put_object",
             Params={"Bucket": bucket, "Key": s3_key, "ContentType": req.content_type},
-            ExpiresIn=3600,
+            ExpiresIn=86400, # 24 hours for large uploads
         )
         return {"method": "PUT", "url": url, "s3_key": s3_key}
 
@@ -908,7 +942,7 @@ async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
         url = s3.generate_presigned_url(
             "upload_part",
             Params={"Bucket": bucket, "Key": s3_key, "UploadId": upload_id, "PartNumber": part_num},
-            ExpiresIn=3600,
+            ExpiresIn=86400, # 24 hours
         )
         part_urls.append({"part_number": part_num, "url": url})
 
