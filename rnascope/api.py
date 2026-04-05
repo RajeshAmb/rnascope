@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -961,6 +961,7 @@ async def proxy_upload_part(
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
+    from rnascope.infra.aws import _get_s3
     s3 = _get_s3()
     bucket = settings.s3_bucket_raw
 
