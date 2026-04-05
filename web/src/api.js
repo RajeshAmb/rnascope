@@ -150,7 +150,7 @@ export async function getUploadMode() {
 // ---------------------------------------------------------------------------
 // S3 direct upload — resumable multipart with localStorage tracking
 // ---------------------------------------------------------------------------
-const S3_PART_SIZE = 50 * 1024 * 1024 // 50 MB per part — required for 60GB+ files (max 10,000 parts)
+const S3_PART_SIZE = 10 * 1024 * 1024 // 10 MB per part — better for unstable connections, still supports 100GB (10,000 parts)
 
 function uploadS3Part(url, chunk, timeoutMs) {
   return new Promise((resolve, reject) => {
