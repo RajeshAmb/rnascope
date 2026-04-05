@@ -152,28 +152,35 @@ export async function getUploadMode() {
 // ---------------------------------------------------------------------------
 const S3_PART_SIZE = 10 * 1024 * 1024 // 10 MB per part — better for unstable connections, still supports 100GB (10,000 parts)
 
-function uploadS3Part(url, chunk, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('PUT', url)
-    xhr.timeout = timeoutMs
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(xhr.getResponseHeader('ETag'))
-      } else {
-        reject(new Error(`S3 part failed (${xhr.status})`))
-      }
+async function uploadS3PartProxy(jobId, s3Key, uploadId, partNumber, body, timeoutMs) {
+  const url = `${BASE}/api/jobs/${jobId}/proxy-upload?s3_key=${encodeURIComponent(s3Key)}&upload_id=${encodeURIComponent(uploadId)}&part_number=${partNumber}`
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const formData = new FormData()
+    formData.append('file', body)
+
+    const res = await fetch(url, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    })
+
+    if (!res.ok) {
+        let message = `Proxy upload failed (${res.status})`
+        try { const d = await res.json(); if(d.detail) message = d.detail } catch(e) {}
+        throw new Error(message)
     }
-    xhr.onerror = () => {
-      console.error(`S3 Network Error: ${url}`)
-      reject(new Error('Network error'))
-    }
-    xhr.ontimeout = () => {
-      console.error(`S3 Timeout: ${url}`)
-      reject(new Error('Timed out'))
-    }
-    xhr.send(chunk)
-  })
+
+    const { etag } = await res.json()
+    return etag
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Timed out')
+    throw err
+  } finally {
+    clearTimeout(id)
+  }
 }
 
 export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
@@ -258,7 +265,8 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
       const etag = await withRetry(() => {
         partProgress[i] = 0
         const chunk = file.slice(start, end)
-        return uploadS3Part(partInfo.url, chunk, 180000) // 3 min timeout for 50MB
+        // Use proxy instead of direct S3 to avoid connection reset issues
+        return uploadS3PartProxy(jobId, presign.s3_key, presign.upload_id, partInfo.part_number, chunk, 180000)
       }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
         if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
       })

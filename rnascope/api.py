@@ -949,6 +949,39 @@ async def get_presigned_url(job_id: str, req: PresignedUrlRequest):
     return {"method": "MULTIPART", "upload_id": upload_id, "s3_key": s3_key, "parts": part_urls}
 
 
+@api_app.post("/api/jobs/{job_id}/proxy-upload")
+async def proxy_upload_part(
+    job_id: str,
+    s3_key: str = Query(...),
+    upload_id: str = Query(...),
+    part_number: int = Query(...),
+    file: UploadFile = File(...),
+):
+    """Proxy an S3 multipart upload part through the server to avoid CORS/connection issues."""
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    s3 = _get_s3()
+    bucket = settings.s3_bucket_raw
+
+    try:
+        # Read the chunk from the request
+        chunk = await file.read()
+        
+        # Upload directly to S3
+        resp = s3.upload_part(
+            Bucket=bucket,
+            Key=s3_key,
+            PartNumber=part_number,
+            UploadId=upload_id,
+            Body=chunk,
+        )
+        return {"etag": resp["ETag"]}
+    except Exception as e:
+        logger.exception("Proxy upload failed for job %s part %d", job_id, part_number)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class CompleteMultipartRequest(BaseModel):
     s3_key: str
     upload_id: str
