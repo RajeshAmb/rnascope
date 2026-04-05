@@ -13,7 +13,7 @@ export default function UploadPage() {
   const [error, setError] = useState(null)
   const [metadataFile, setMetadataFile] = useState(null)
   const [metadataPreview, setMetadataPreview] = useState(null)
-  const [uploadState, setUploadState] = useState(null) // { phase, fileProgress, filesDone, totalFiles }
+  const [uploadState, setUploadState] = useState(null) // { phase, fileProgress, filesDone, totalFiles, retryInfo }
   const [useS3, setUseS3] = useState(null)
 
   // Check if S3 direct upload is available on mount
@@ -101,21 +101,26 @@ export default function UploadPage() {
       let filesDone = 0
 
       const uploader = useS3 ? uploadFileS3 : uploadFile
-      const uploadNext = async () => {
-        while (queue.length > 0) {
-          const file = queue.shift()
-          await uploader(job_id, file, (fraction) => {
+      // Upload one file at a time — sequential for connection stability
+      for (const file of queue) {
+        await uploader(
+          job_id,
+          file,
+          (fraction) => {
             fileProgress[file.name] = Math.round(fraction * 100)
-            setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress } }))
-          })
-          filesDone++
-          fileProgress[file.name] = 100
-          setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, filesDone }))
-        }
+            setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, retryInfo: null }))
+          },
+          (retry) => {
+            setUploadState((s) => ({
+              ...s,
+              retryInfo: `${file.name}: retry ${retry.attempt}/${retry.max} (chunk ${retry.chunk}/${retry.totalChunks}) — waiting ${Math.round(retry.waitMs / 1000)}s`,
+            }))
+          }
+        )
+        filesDone++
+        fileProgress[file.name] = 100
+        setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, filesDone, retryInfo: null }))
       }
-
-      const workers = Array.from({ length: Math.min(MAX_PARALLEL_FILES, files.length) }, () => uploadNext())
-      await Promise.all(workers)
 
       // Step 3: Start pipeline
       setUploadState((s) => ({ ...s, phase: 'starting' }))
@@ -252,10 +257,15 @@ export default function UploadPage() {
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">
-                Uploading {uploadState.filesDone} / {uploadState.totalFiles} files ({MAX_PARALLEL_FILES} parallel)
+                Uploading {uploadState.filesDone} / {uploadState.totalFiles} files
               </h2>
-              <span className="text-sm text-gray-500">Server upload</span>
+              <span className="text-sm text-gray-500">{useS3 ? 'S3 direct (2MB chunks)' : 'Server upload'}</span>
             </div>
+            {uploadState.retryInfo && (
+              <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg px-3 py-2 text-xs mb-3">
+                Retrying: {uploadState.retryInfo}
+              </div>
+            )}
             <div className="space-y-3">
               {Object.entries(uploadState.fileProgress).map(([name, pct]) => (
                 <div key={name}>

@@ -14,9 +14,9 @@ export async function initJob(metadata) {
   return res.json()
 }
 
-const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB per chunk (fits Render's 512MB RAM with parallel uploads)
-const MAX_RETRIES = 5
-const BASE_DELAY_MS = 1000 // 1s, doubles each retry (1s, 2s, 4s, 8s, 16s)
+const CHUNK_SIZE = 5 * 1024 * 1024 // 5 MB per chunk for server upload
+const MAX_RETRIES = 15
+const BASE_DELAY_MS = 2000 // 2s, doubles each retry (2s, 4s, 8s ... capped at 60s)
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -28,15 +28,56 @@ async function withRetry(fn, retries = MAX_RETRIES, onRetry) {
       return await fn()
     } catch (err) {
       if (attempt === retries) throw err
-      const waitMs = BASE_DELAY_MS * Math.pow(2, attempt)
+      const waitMs = Math.min(BASE_DELAY_MS * Math.pow(2, attempt), 60000) // cap at 60s
       if (onRetry) onRetry(attempt + 1, retries, waitMs, err.message)
       await delay(waitMs)
     }
   }
 }
 
-const PARALLEL_CHUNKS = 2 // upload 2 chunks of the same file concurrently (keep low for 512MB servers)
+// ---------------------------------------------------------------------------
+// localStorage-based resume tracker
+// ---------------------------------------------------------------------------
+function _resumeKey(jobId, filename) {
+  return `upload_${jobId}_${filename}`
+}
 
+function getCompletedParts(jobId, filename) {
+  try {
+    const raw = localStorage.getItem(_resumeKey(jobId, filename))
+    return raw ? JSON.parse(raw) : {} // { partIndex: etag }
+  } catch { return {} }
+}
+
+function markPartComplete(jobId, filename, partIndex, etag) {
+  const parts = getCompletedParts(jobId, filename)
+  parts[partIndex] = etag
+  localStorage.setItem(_resumeKey(jobId, filename), JSON.stringify(parts))
+}
+
+function clearResume(jobId, filename) {
+  localStorage.removeItem(_resumeKey(jobId, filename))
+}
+
+// Save presign data so we can resume without re-requesting
+function savePresignData(jobId, filename, presign) {
+  localStorage.setItem(`presign_${jobId}_${filename}`, JSON.stringify(presign))
+}
+
+function getPresignData(jobId, filename) {
+  try {
+    const raw = localStorage.getItem(`presign_${jobId}_${filename}`)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function clearPresignData(jobId, filename) {
+  localStorage.removeItem(`presign_${jobId}_${filename}`)
+}
+
+// ---------------------------------------------------------------------------
+// Server chunked upload (fallback when S3 is not available)
+// ---------------------------------------------------------------------------
 function uploadOneChunk(jobId, file, chunkIndex, totalChunks, onChunkProgress) {
   const start = chunkIndex * CHUNK_SIZE
   const end = Math.min(start + CHUNK_SIZE, file.size)
@@ -50,6 +91,7 @@ function uploadOneChunk(jobId, file, chunkIndex, totalChunks, onChunkProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `${BASE}/api/jobs/${jobId}/upload`)
+    xhr.timeout = 120000 // 2 min per 5MB chunk
     if (onChunkProgress) {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onChunkProgress(chunkIndex, e.loaded)
@@ -63,13 +105,14 @@ function uploadOneChunk(jobId, file, chunkIndex, totalChunks, onChunkProgress) {
       }
     }
     xhr.onerror = () => reject(new Error('Network error during upload'))
+    xhr.ontimeout = () => reject(new Error('Upload timed out — retrying'))
     xhr.send(fd)
   })
 }
 
 export async function uploadFile(jobId, file, onProgress, onRetryStatus) {
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-  const chunkProgress = new Array(totalChunks).fill(0) // bytes uploaded per chunk
+  const chunkProgress = new Array(totalChunks).fill(0)
 
   const reportProgress = () => {
     if (!onProgress) return
@@ -77,7 +120,6 @@ export async function uploadFile(jobId, file, onProgress, onRetryStatus) {
     onProgress(totalUploaded / file.size)
   }
 
-  // Upload chunks sequentially to avoid overwhelming the connection
   for (let idx = 0; idx < totalChunks; idx++) {
     await withRetry(() => {
       chunkProgress[idx] = 0
@@ -105,52 +147,90 @@ export async function getUploadMode() {
   return res.json()
 }
 
-const S3_PART_SIZE = 5 * 1024 * 1024 // 5 MB per S3 multipart part (smaller chunks survive flaky connections)
+// ---------------------------------------------------------------------------
+// S3 direct upload — resumable multipart with localStorage tracking
+// ---------------------------------------------------------------------------
+const S3_PART_SIZE = 2 * 1024 * 1024 // 2 MB per part — small enough to finish before idle timeout
+
+function uploadS3Part(url, chunk, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+    xhr.timeout = timeoutMs
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.getResponseHeader('ETag'))
+      } else {
+        reject(new Error(`S3 part failed (${xhr.status})`))
+      }
+    }
+    xhr.onerror = () => reject(new Error('Network error'))
+    xhr.ontimeout = () => reject(new Error('Timed out'))
+    xhr.send(chunk)
+  })
+}
 
 export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
   const partCount = Math.ceil(file.size / S3_PART_SIZE)
 
-  // Get presigned URL(s) — retry this too
-  const presign = await withRetry(async () => {
-    const res = await fetch(`${BASE}/api/jobs/${jobId}/presign`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, content_type: file.type || 'application/gzip', part_count: partCount }),
+  // Check if we have a saved presign (resume scenario)
+  let presign = getPresignData(jobId, file.name)
+
+  if (!presign || presign.parts?.length !== partCount) {
+    // Get fresh presigned URLs
+    presign = await withRetry(async () => {
+      const res = await fetch(`${BASE}/api/jobs/${jobId}/presign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, content_type: file.type || 'application/gzip', part_count: partCount }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      return res.json()
+    }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+      if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: 0, totalChunks: partCount, error: errMsg })
     })
-    if (!res.ok) throw new Error(await res.text())
-    return res.json()
-  }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
-    if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: 0, totalChunks: partCount, error: errMsg })
-  })
+    savePresignData(jobId, file.name, presign)
+  }
 
   if (presign.method === 'PUT') {
-    // Single PUT upload (file < 5GB) with retry
-    await withRetry(() => new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('PUT', presign.url)
-      xhr.setRequestHeader('Content-Type', file.type || 'application/gzip')
-      if (onProgress) {
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) onProgress(e.loaded / e.total)
+    // Small file — single PUT (shouldn't happen with 2MB parts, but handle it)
+    await withRetry(() => {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('PUT', presign.url)
+        xhr.setRequestHeader('Content-Type', file.type || 'application/gzip')
+        xhr.timeout = 600000 // 10 min
+        if (onProgress) {
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) onProgress(e.loaded / e.total)
+          }
         }
-      }
-      xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`S3 upload failed (${xhr.status})`))
-      xhr.onerror = () => reject(new Error('Network error during S3 upload'))
-      xhr.send(file)
-    }), MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+        xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`S3 upload failed (${xhr.status})`))
+        xhr.onerror = () => reject(new Error('Network error during S3 upload'))
+        xhr.ontimeout = () => reject(new Error('Upload timed out — retrying'))
+        xhr.send(file)
+      })
+    }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
       if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: 1, totalChunks: 1, error: errMsg })
     })
 
-    // Register file with backend
     const regFd = new FormData()
     regFd.append('filename', file.name)
     regFd.append('size_bytes', file.size)
     await fetch(`${BASE}/api/jobs/${jobId}/presign/register`, { method: 'POST', body: regFd })
 
   } else {
-    // Multipart upload — parallel parts with worker pool
+    // Multipart upload — sequential, resumable via localStorage
+    const completedParts = getCompletedParts(jobId, file.name)
     const parts = new Array(presign.parts.length)
     const partProgress = new Array(presign.parts.length).fill(0)
+
+    // Pre-fill completed parts
+    for (const [idx, etag] of Object.entries(completedParts)) {
+      const i = parseInt(idx)
+      parts[i] = { part_number: presign.parts[i].part_number, etag }
+      partProgress[i] = Math.min(S3_PART_SIZE, file.size - i * S3_PART_SIZE)
+    }
 
     const reportS3Progress = () => {
       if (!onProgress) return
@@ -158,8 +238,13 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
       onProgress(totalUploaded / file.size)
     }
 
-    // Upload parts sequentially to avoid overwhelming the network connection
+    reportS3Progress() // Show already-completed progress immediately
+
+    // Upload remaining parts one at a time
     for (let i = 0; i < presign.parts.length; i++) {
+      // Skip already completed parts
+      if (completedParts[i]) continue
+
       const partInfo = presign.parts[i]
       const start = i * S3_PART_SIZE
       const end = Math.min(start + S3_PART_SIZE, file.size)
@@ -167,34 +252,15 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
       const etag = await withRetry(() => {
         partProgress[i] = 0
         const chunk = file.slice(start, end)
-        return new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest()
-          xhr.open('PUT', partInfo.url)
-          xhr.timeout = 120000 // 2 min timeout per 5MB chunk
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              partProgress[i] = e.loaded
-              reportS3Progress()
-            }
-          }
-          xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-              resolve(xhr.getResponseHeader('ETag'))
-            } else {
-              reject(new Error(`S3 part upload failed (${xhr.status})`))
-            }
-          }
-          xhr.onerror = () => reject(new Error('Network error during S3 part upload'))
-          xhr.ontimeout = () => reject(new Error('Upload timed out — retrying'))
-          xhr.send(chunk)
-        })
-      }, 10, (attempt, max, waitMs, errMsg) => { // 10 retries for flaky connections
+        return uploadS3Part(partInfo.url, chunk, 60000) // 60s timeout for 2MB
+      }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
         if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
       })
 
       partProgress[i] = Math.min(S3_PART_SIZE, file.size - i * S3_PART_SIZE)
-      reportS3Progress()
       parts[i] = { part_number: partInfo.part_number, etag }
+      markPartComplete(jobId, file.name, i, etag)
+      reportS3Progress()
     }
 
     // Complete multipart upload
@@ -206,6 +272,10 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
       })
       if (!res.ok) throw new Error(await res.text())
     })
+
+    // Clean up resume data on success
+    clearResume(jobId, file.name)
+    clearPresignData(jobId, file.name)
   }
 
   return { filename: file.name, size_mb: Math.round(file.size / (1024 * 1024)) }

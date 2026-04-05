@@ -31,7 +31,13 @@ def _get_s3():
             region_name=settings.aws_region,
             aws_access_key_id=settings.aws_access_key_id or None,
             aws_secret_access_key=settings.aws_secret_access_key or None,
-            config=Config(signature_version="s3v4"),
+            config=Config(
+                signature_version="s3v4",
+                tcp_keepalive=True,
+                retries={"max_attempts": 10, "mode": "adaptive"},
+                connect_timeout=30,
+                read_timeout=300,
+            ),
         )
     return _s3
 
