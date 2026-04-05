@@ -26,9 +26,11 @@ def _get_s3():
     global _s3
     if _s3 is None:
         from botocore.config import Config
+        endpoint_url = f"https://s3.{settings.aws_region}.amazonaws.com"
         _s3 = boto3.client(
             "s3",
             region_name=settings.aws_region,
+            endpoint_url=endpoint_url,
             aws_access_key_id=settings.aws_access_key_id or None,
             aws_secret_access_key=settings.aws_secret_access_key or None,
             config=Config(
