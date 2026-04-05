@@ -37,11 +37,53 @@ api_app.add_middleware(
 # In-memory stores
 _chat_sessions: dict[str, ChatAgent] = {}
 _active_websockets: dict[str, list[WebSocket]] = {}
-_jobs_store: dict[str, dict] = {}
 
 # Upload temp dir
 UPLOAD_DIR = Path(os.environ.get("RNASCOPE_UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Persistent job store — survives server restarts
+_JOBS_DIR = UPLOAD_DIR / ".jobs"
+_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class _PersistentJobStore:
+    """Dict-like store that persists each job as a JSON file on disk."""
+
+    def __init__(self, directory: Path):
+        self._dir = directory
+
+    def _path(self, job_id: str) -> Path:
+        return self._dir / f"{job_id}.json"
+
+    def __contains__(self, job_id: str) -> bool:
+        return self._path(job_id).exists()
+
+    def __setitem__(self, job_id: str, state: dict):
+        self._path(job_id).write_text(json.dumps(state), encoding="utf-8")
+
+    def __getitem__(self, job_id: str) -> dict:
+        p = self._path(job_id)
+        if not p.exists():
+            raise KeyError(job_id)
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def get(self, job_id: str, default=None):
+        try:
+            return self[job_id]
+        except KeyError:
+            return default
+
+    def items(self):
+        for p in self._dir.glob("*.json"):
+            job_id = p.stem
+            try:
+                yield job_id, json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+
+_jobs_store = _PersistentJobStore(_JOBS_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +855,7 @@ def _register_file(job_id: str, filename: str, size_bytes: int):
         if filename not in job["files"]:
             job["files"].append(filename)
         job["dataset_size_gb"] = round(job["dataset_size_gb"] + size_bytes / (1024**3), 2)
+    _jobs_store[job_id] = job
 
 
 # ---------------------------------------------------------------------------
@@ -1032,6 +1075,7 @@ async def start_job(job_id: str):
 
     job["status"] = "running"
     job["current_step"] = "ingestion"
+    _jobs_store[job_id] = job
 
     asyncio.get_event_loop().run_in_executor(None, _simulate_pipeline, job_id)
 
@@ -1068,6 +1112,7 @@ def _simulate_pipeline(job_id: str):
         job["steps_completed"] = [s[0] for s in steps[:i]]
         job["pct_complete"] = round((i / len(steps)) * 100, 1)
         job["cost_so_far_usd"] = round(0.12 * (i + 1), 2)
+        _jobs_store[job_id] = job
 
         # Notify websockets
         _broadcast_sync(job_id, {
@@ -1093,6 +1138,7 @@ def _simulate_pipeline(job_id: str):
             n_a=job.get("n_a", 3),
             n_b=job.get("n_b", 3),
         )
+        _jobs_store[job_id] = job
 
         _broadcast_sync(job_id, {
             "type": "pipeline_complete",
