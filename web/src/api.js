@@ -77,27 +77,20 @@ export async function uploadFile(jobId, file, onProgress, onRetryStatus) {
     onProgress(totalUploaded / file.size)
   }
 
-  // Process chunks with a pool of PARALLEL_CHUNKS workers
-  const queue = Array.from({ length: totalChunks }, (_, i) => i)
-  const workers = Array.from({ length: Math.min(PARALLEL_CHUNKS, totalChunks) }, async () => {
-    while (queue.length > 0) {
-      const idx = queue.shift()
-      if (idx === undefined) break
-      await withRetry(() => {
-        chunkProgress[idx] = 0
-        return uploadOneChunk(jobId, file, idx, totalChunks, (ci, loaded) => {
-          chunkProgress[ci] = loaded
-          reportProgress()
-        })
-      }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
-        if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: idx + 1, totalChunks, error: errMsg })
+  // Upload chunks sequentially to avoid overwhelming the connection
+  for (let idx = 0; idx < totalChunks; idx++) {
+    await withRetry(() => {
+      chunkProgress[idx] = 0
+      return uploadOneChunk(jobId, file, idx, totalChunks, (ci, loaded) => {
+        chunkProgress[ci] = loaded
+        reportProgress()
       })
-      chunkProgress[idx] = Math.min(CHUNK_SIZE, file.size - idx * CHUNK_SIZE)
-      reportProgress()
-    }
-  })
-
-  await Promise.all(workers)
+    }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+      if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: idx + 1, totalChunks, error: errMsg })
+    })
+    chunkProgress[idx] = Math.min(CHUNK_SIZE, file.size - idx * CHUNK_SIZE)
+    reportProgress()
+  }
   return { filename: file.name, size_mb: Math.round(file.size / (1024 * 1024)) }
 }
 
@@ -165,48 +158,42 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
       onProgress(totalUploaded / file.size)
     }
 
-    const partQueue = presign.parts.map((p, i) => ({ ...p, index: i }))
-    const s3Workers = Array.from({ length: Math.min(PARALLEL_CHUNKS, presign.parts.length) }, async () => {
-      while (partQueue.length > 0) {
-        const partInfo = partQueue.shift()
-        if (!partInfo) break
-        const i = partInfo.index
-        const start = i * S3_PART_SIZE
-        const end = Math.min(start + S3_PART_SIZE, file.size)
+    // Upload parts sequentially to avoid overwhelming the network connection
+    for (let i = 0; i < presign.parts.length; i++) {
+      const partInfo = presign.parts[i]
+      const start = i * S3_PART_SIZE
+      const end = Math.min(start + S3_PART_SIZE, file.size)
 
-        const etag = await withRetry(() => {
-          partProgress[i] = 0
-          const chunk = file.slice(start, end)
-          return new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest()
-            xhr.open('PUT', partInfo.url)
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable) {
-                partProgress[i] = e.loaded
-                reportS3Progress()
-              }
+      const etag = await withRetry(() => {
+        partProgress[i] = 0
+        const chunk = file.slice(start, end)
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('PUT', partInfo.url)
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              partProgress[i] = e.loaded
+              reportS3Progress()
             }
-            xhr.onload = () => {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(xhr.getResponseHeader('ETag'))
-              } else {
-                reject(new Error(`S3 part upload failed (${xhr.status})`))
-              }
+          }
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(xhr.getResponseHeader('ETag'))
+            } else {
+              reject(new Error(`S3 part upload failed (${xhr.status})`))
             }
-            xhr.onerror = () => reject(new Error('Network error during S3 part upload'))
-            xhr.send(chunk)
-          })
-        }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
-          if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
+          }
+          xhr.onerror = () => reject(new Error('Network error during S3 part upload'))
+          xhr.send(chunk)
         })
+      }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+        if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
+      })
 
-        partProgress[i] = Math.min(S3_PART_SIZE, file.size - i * S3_PART_SIZE)
-        reportS3Progress()
-        parts[i] = { part_number: partInfo.part_number, etag }
-      }
-    })
-
-    await Promise.all(s3Workers)
+      partProgress[i] = Math.min(S3_PART_SIZE, file.size - i * S3_PART_SIZE)
+      reportS3Progress()
+      parts[i] = { part_number: partInfo.part_number, etag }
+    }
 
     // Complete multipart upload
     await withRetry(async () => {
