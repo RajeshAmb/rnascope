@@ -1075,6 +1075,38 @@ async def _upload_to_s3_and_cleanup(job_id: str, filename: str, local_path: Path
     _register_file(job_id, filename, file_size)
 
 
+@api_app.post("/api/jobs/{job_id}/sync-s3")
+async def sync_s3_files(job_id: str):
+    """Scan S3 for files under this job_id and register them.
+
+    Use this after uploading files via AWS CLI:
+        aws s3 sync ./fastq_folder s3://rnascope-raw-data/<job_id>/
+    """
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not S3_UPLOAD_ENABLED:
+        raise HTTPException(status_code=501, detail="S3 not configured")
+
+    from rnascope.infra.aws import s3_list_objects
+    bucket = settings.s3_bucket_raw
+    objects = s3_list_objects(bucket, f"{job_id}/")
+
+    registered = 0
+    for obj in objects:
+        filename = obj["key"].split("/", 1)[-1]
+        if filename:
+            _register_file(job_id, filename, obj["size"])
+            registered += 1
+
+    job = _jobs_store[job_id]
+    return {
+        "job_id": job_id,
+        "files_registered": registered,
+        "total_files": len(job["files"]),
+        "dataset_size_gb": job["dataset_size_gb"],
+    }
+
+
 @api_app.post("/api/jobs/{job_id}/start")
 async def start_job(job_id: str):
     """Start the pipeline after all files have been uploaded."""
