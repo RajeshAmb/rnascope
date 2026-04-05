@@ -1469,6 +1469,9 @@ for _candidate in _static_candidates:
 if _static_dir:
     logger.info("Serving frontend from: %s", _static_dir)
 
+    # Serve static assets (js, css, etc.) with correct MIME types
+    api_app.mount("/assets", StaticFiles(directory=str(_static_dir / "assets")), name="static-assets")
+
     @api_app.get("/{path:path}")
     async def serve_spa(path: str):
         if path.startswith("api/") or path.startswith("ws/") or path == "health":
