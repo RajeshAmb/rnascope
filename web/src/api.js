@@ -35,7 +35,7 @@ async function withRetry(fn, retries = MAX_RETRIES, onRetry) {
   }
 }
 
-const PARALLEL_CHUNKS = 4 // upload 4 chunks of the same file concurrently
+const PARALLEL_CHUNKS = 2 // upload 2 chunks of the same file concurrently (keep low for 512MB servers)
 
 function uploadOneChunk(jobId, file, chunkIndex, totalChunks, onChunkProgress) {
   const start = chunkIndex * CHUNK_SIZE

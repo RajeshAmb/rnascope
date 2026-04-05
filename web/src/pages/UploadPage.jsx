@@ -1,10 +1,10 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, X, Loader2, FlaskConical, Table } from 'lucide-react'
 import { initJob, uploadFile, uploadFileS3, startJob, getUploadMode } from '../api'
 
-const MAX_PARALLEL_FILES = 3
+const MAX_PARALLEL_FILES = 1
 
 export default function UploadPage() {
   const navigate = useNavigate()
@@ -17,9 +17,9 @@ export default function UploadPage() {
   const [useS3, setUseS3] = useState(null)
 
   // Check if S3 direct upload is available on mount
-  useState(() => {
+  useEffect(() => {
     getUploadMode().then((m) => setUseS3(m.s3_enabled)).catch(() => setUseS3(false))
-  })
+  }, [])
 
   const [form, setForm] = useState({
     project_name: '',

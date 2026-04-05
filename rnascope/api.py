@@ -840,6 +840,7 @@ async def init_job(
 STREAM_CHUNK = 1024 * 1024  # 1 MB disk-write buffer
 _METADATA_EXTS = {".csv", ".tsv", ".txt"}
 _assembly_locks: dict[str, asyncio.Lock] = {}  # per-file locks to prevent concurrent reassembly
+_upload_semaphore = asyncio.Semaphore(4)  # max 4 concurrent upload requests to prevent OOM on small instances
 
 
 def _is_metadata_file(filename: str) -> bool:
@@ -967,6 +968,17 @@ async def upload_file(
     filename: str = Form(""),
 ):
     """Upload a file chunk. Chunks are written to disk and assembled on final chunk."""
+    async with _upload_semaphore:
+        return await _upload_file_inner(job_id, file, chunk_index, total_chunks, filename)
+
+
+async def _upload_file_inner(
+    job_id: str,
+    file: UploadFile,
+    chunk_index: int,
+    total_chunks: int,
+    filename: str,
+):
     if job_id not in _jobs_store:
         raise HTTPException(status_code=404, detail="Job not found")
 
