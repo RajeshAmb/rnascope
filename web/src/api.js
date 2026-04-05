@@ -105,7 +105,7 @@ export async function getUploadMode() {
   return res.json()
 }
 
-const S3_PART_SIZE = 10 * 1024 * 1024 // 10 MB per S3 multipart part
+const S3_PART_SIZE = 5 * 1024 * 1024 // 5 MB per S3 multipart part (smaller chunks survive flaky connections)
 
 export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
   const partCount = Math.ceil(file.size / S3_PART_SIZE)
@@ -170,6 +170,7 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
         return new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest()
           xhr.open('PUT', partInfo.url)
+          xhr.timeout = 120000 // 2 min timeout per 5MB chunk
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
               partProgress[i] = e.loaded
@@ -184,9 +185,10 @@ export async function uploadFileS3(jobId, file, onProgress, onRetryStatus) {
             }
           }
           xhr.onerror = () => reject(new Error('Network error during S3 part upload'))
+          xhr.ontimeout = () => reject(new Error('Upload timed out — retrying'))
           xhr.send(chunk)
         })
-      }, MAX_RETRIES, (attempt, max, waitMs, errMsg) => {
+      }, 10, (attempt, max, waitMs, errMsg) => { // 10 retries for flaky connections
         if (onRetryStatus) onRetryStatus({ attempt, max, waitMs, chunk: i + 1, totalChunks: presign.parts.length, error: errMsg })
       })
 
