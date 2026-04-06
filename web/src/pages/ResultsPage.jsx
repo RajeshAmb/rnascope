@@ -22,6 +22,7 @@ import { BaseQualityPlot, GCContentPlot, AdapterContentPlot } from '../component
 import { MappingRatePlot, ReadDistributionPlot, GeneBodyCoveragePlot } from '../components/charts/AlignmentPlots'
 import { ExpressionBoxplot, ExpressionDensity, CorrelationHeatmap } from '../components/charts/ExpressionPlots'
 import { MAPlot, DispersionPlot, TimeSeriesPlot } from '../components/charts/DEGAdvancedPlots'
+import BiomarkerPlot from '../components/charts/BiomarkerPlot'
 import { Loader2, Lightbulb, FlaskConical, BookOpen, Download } from 'lucide-react'
 
 const ALL_TABS = [
@@ -31,6 +32,7 @@ const ALL_TABS = [
   { key: 'expression', label: 'Expression' },
   { key: 'qc', label: 'QC Summary' },
   { key: 'deg', label: 'DEG' },
+  { key: 'biomarkers', label: 'Biomarkers' },
   { key: 'transcripts', label: 'Transcripts' },
   { key: 'annotation', label: 'Annotation' },
   { key: 'pathway', label: 'Pathways' },
@@ -445,6 +447,13 @@ export default function ResultsPage() {
                 </ChartCard>
               )}
             </div>
+          )}
+
+          {/* ============ BIOMARKERS TAB ============ */}
+          {activeTab === 'biomarkers' && results.biomarkers && (
+            <ChartCard title="ML Biomarker Selection">
+              <BiomarkerPlot biomarkers={results.biomarkers} />
+            </ChartCard>
           )}
 
           {/* ============ TRANSCRIPTS TAB ============ */}

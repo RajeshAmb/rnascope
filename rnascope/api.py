@@ -870,6 +870,157 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "dispersion": dispersion_data,
         "time_series": time_series_data,
         "annotations": annotations,
+        "biomarkers": _generate_biomarker_results(volcano_data, condition_a, condition_b, domain),
+    }
+
+
+def _generate_biomarker_results(volcano_data: list, condition_a: str, condition_b: str, domain: str) -> dict:
+    """Generate ML-based biomarker selection results (RF, SVM, LASSO)."""
+    import random as _rnd
+
+    # Get significant genes sorted by absolute log2FC
+    sig_genes = sorted(
+        [g for g in volcano_data if g.get("significant")],
+        key=lambda g: abs(g["log2fc"]),
+        reverse=True,
+    )
+    if not sig_genes:
+        return {}
+
+    # Top candidate genes for biomarker analysis
+    candidates = sig_genes[:min(50, len(sig_genes))]
+
+    # --- Random Forest feature importance ---
+    rf_importance = []
+    for i, g in enumerate(candidates):
+        imp = max(0.01, 1.0 / (1 + i * 0.3) + _rnd.gauss(0, 0.05))
+        rf_importance.append({"gene": g["gene"], "importance": round(imp, 4), "rank": i + 1})
+    rf_importance.sort(key=lambda x: x["importance"], reverse=True)
+    for i, item in enumerate(rf_importance):
+        item["rank"] = i + 1
+
+    # --- SVM (RFE) ranking ---
+    svm_ranking = []
+    shuffled = list(range(len(candidates)))
+    _rnd.shuffle(shuffled)
+    # Bias toward top DEGs being ranked higher
+    for i, g in enumerate(candidates):
+        rfe_rank = max(1, i + 1 + _rnd.randint(-3, 3))
+        svm_ranking.append({"gene": g["gene"], "rfe_rank": rfe_rank, "support_vector": _rnd.random() < 0.6})
+    svm_ranking.sort(key=lambda x: x["rfe_rank"])
+    for i, item in enumerate(svm_ranking):
+        item["rfe_rank"] = i + 1
+
+    # --- LASSO coefficients ---
+    lasso_coefs = []
+    for g in candidates:
+        coef = g["log2fc"] * _rnd.uniform(0.1, 0.5) * (1 if abs(g["log2fc"]) > 1.5 else _rnd.uniform(0, 0.3))
+        if abs(coef) > 0.01:  # LASSO zeroes out weak features
+            lasso_coefs.append({"gene": g["gene"], "coefficient": round(coef, 4), "selected": True})
+        else:
+            lasso_coefs.append({"gene": g["gene"], "coefficient": 0.0, "selected": False})
+    lasso_selected = [c for c in lasso_coefs if c["selected"]]
+
+    # --- Consensus biomarkers (genes selected by all 3 methods) ---
+    rf_top = {x["gene"] for x in rf_importance[:20]}
+    svm_top = {x["gene"] for x in svm_ranking[:20]}
+    lasso_top = {x["gene"] for x in lasso_selected[:20]}
+    consensus_genes = rf_top & svm_top & lasso_top
+
+    # Build consensus list with per-method scores
+    rf_map = {x["gene"]: x for x in rf_importance}
+    svm_map = {x["gene"]: x for x in svm_ranking}
+    lasso_map = {x["gene"]: x for x in lasso_coefs}
+
+    consensus = []
+    for gene in sorted(consensus_genes, key=lambda g: rf_map[g]["importance"], reverse=True):
+        vol = next((v for v in volcano_data if v["gene"] == gene), {})
+        consensus.append({
+            "gene": gene,
+            "log2fc": vol.get("log2fc", 0),
+            "fdr": vol.get("fdr", 1),
+            "rf_importance": rf_map[gene]["importance"],
+            "rf_rank": rf_map[gene]["rank"],
+            "svm_rank": svm_map[gene]["rfe_rank"],
+            "lasso_coef": lasso_map[gene]["coefficient"],
+        })
+
+    # --- Model performance metrics ---
+    models = {
+        "random_forest": {
+            "accuracy": round(_rnd.uniform(0.88, 0.96), 3),
+            "auc": round(_rnd.uniform(0.90, 0.98), 3),
+            "precision": round(_rnd.uniform(0.85, 0.95), 3),
+            "recall": round(_rnd.uniform(0.82, 0.94), 3),
+            "f1": round(_rnd.uniform(0.85, 0.94), 3),
+            "cv_folds": 5,
+            "n_features_used": len(rf_top),
+        },
+        "svm": {
+            "accuracy": round(_rnd.uniform(0.85, 0.94), 3),
+            "auc": round(_rnd.uniform(0.88, 0.96), 3),
+            "precision": round(_rnd.uniform(0.83, 0.93), 3),
+            "recall": round(_rnd.uniform(0.80, 0.92), 3),
+            "f1": round(_rnd.uniform(0.82, 0.92), 3),
+            "cv_folds": 5,
+            "n_features_used": len(svm_top),
+        },
+        "lasso": {
+            "accuracy": round(_rnd.uniform(0.82, 0.92), 3),
+            "auc": round(_rnd.uniform(0.85, 0.95), 3),
+            "precision": round(_rnd.uniform(0.80, 0.91), 3),
+            "recall": round(_rnd.uniform(0.78, 0.90), 3),
+            "f1": round(_rnd.uniform(0.79, 0.90), 3),
+            "cv_folds": 5,
+            "n_features_used": len(lasso_selected),
+            "lambda": round(_rnd.uniform(0.001, 0.1), 4),
+        },
+    }
+
+    # --- ROC curve data per model ---
+    roc_curves = {}
+    for model_name in ["random_forest", "svm", "lasso"]:
+        auc = models[model_name]["auc"]
+        fpr = [0.0]
+        tpr = [0.0]
+        for t in range(1, 20):
+            f = t / 20.0
+            # Simulate a curve that bows toward top-left based on AUC
+            tp = min(1.0, f ** (1 / max(auc * 2, 1.01)))
+            fpr.append(round(f, 3))
+            tpr.append(round(tp, 3))
+        fpr.append(1.0)
+        tpr.append(1.0)
+        roc_curves[model_name] = {"fpr": fpr, "tpr": tpr, "auc": auc}
+
+    # --- Confusion matrix for best model ---
+    n_test = _rnd.randint(8, 15)
+    tp = int(n_test * models["random_forest"]["recall"])
+    fn = n_test - tp
+    fp = max(0, int(n_test * (1 - models["random_forest"]["precision"])))
+    tn = n_test - fp
+    confusion = {"tp": tp, "fn": fn, "fp": fp, "tn": tn, "labels": [condition_a, condition_b]}
+
+    return {
+        "comparisons": [
+            {"label": f"{condition_a} vs {condition_b}", "type": "primary"},
+        ],
+        "random_forest": rf_importance[:20],
+        "svm_ranking": svm_ranking[:20],
+        "lasso_coefficients": lasso_coefs,
+        "consensus_biomarkers": consensus,
+        "model_performance": models,
+        "roc_curves": roc_curves,
+        "confusion_matrix": confusion,
+        "summary": {
+            "total_deg_input": len(sig_genes),
+            "rf_top_features": len(rf_top),
+            "svm_top_features": len(svm_top),
+            "lasso_selected": len(lasso_selected),
+            "consensus_count": len(consensus),
+            "best_model": "random_forest",
+            "best_auc": models["random_forest"]["auc"],
+        },
     }
 
 
@@ -1352,6 +1503,7 @@ def _simulate_pipeline(job_id: str):
         ("quantification", "featureCounts quantification..."),
         ("transcript_quant", "Salmon transcript quantification..."),
         ("deg", "DESeq2 differential expression..."),
+        ("biomarker", "ML biomarker selection (RF + SVM + LASSO)..."),
         ("annotation", "Gene annotation..."),
         ("pathway", "Pathway enrichment analysis..."),
         ("biotype", "RNA biotype classification..."),
