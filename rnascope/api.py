@@ -1704,9 +1704,137 @@ async def start_job(job_id: str):
     job["current_step"] = "ingestion"
     _jobs_store[job_id] = job
 
-    asyncio.get_event_loop().run_in_executor(None, _simulate_pipeline, job_id)
+    # Try real pipeline (AWS Batch) first, fall back to simulation
+    use_real = bool(
+        settings.aws_access_key_id
+        and os.environ.get("ECR_IMAGE_URI")
+        and os.environ.get("BATCH_JOB_QUEUE")
+    )
+    if use_real:
+        asyncio.get_event_loop().run_in_executor(None, _launch_real_pipeline, job_id)
+    else:
+        asyncio.get_event_loop().run_in_executor(None, _simulate_pipeline, job_id)
 
-    return {"job_id": job_id, "status": "started", "files_uploaded": len(job["files"]), "size_gb": job["dataset_size_gb"]}
+    mode = "real (AWS Batch)" if use_real else "demo (simulated)"
+    return {"job_id": job_id, "status": "started", "mode": mode,
+            "files_uploaded": len(job["files"]), "size_gb": job["dataset_size_gb"]}
+
+
+def _launch_real_pipeline(job_id: str):
+    """Submit an AWS Batch job for the real pipeline and poll for results."""
+    import time
+
+    job = _jobs_store.get(job_id)
+    if not job:
+        return
+
+    try:
+        from rnascope.infra.aws import _get_s3
+        import boto3 as _boto3
+
+        batch = _boto3.client("batch", region_name=settings.aws_region,
+                              aws_access_key_id=settings.aws_access_key_id,
+                              aws_secret_access_key=settings.aws_secret_access_key)
+        s3 = _get_s3()
+
+        # Submit Batch job
+        response = batch.submit_job(
+            jobName=f"rnascope-{job_id}",
+            jobQueue=os.environ.get("BATCH_JOB_QUEUE", "rnascope-queue"),
+            jobDefinition=os.environ.get("BATCH_JOB_DEFINITION", "rnascope-job-def"),
+            containerOverrides={
+                "environment": [
+                    {"name": "JOB_ID", "value": job_id},
+                    {"name": "SPECIES", "value": job.get("species", "cotton_arboreum")},
+                    {"name": "CONDITION_A", "value": job.get("condition_a", "Resistant")},
+                    {"name": "CONDITION_B", "value": job.get("condition_b", "Susceptible")},
+                    {"name": "N_A", "value": str(job.get("n_a", 15))},
+                    {"name": "N_B", "value": str(job.get("n_b", 15))},
+                    {"name": "S3_BUCKET_RAW", "value": settings.s3_bucket_raw},
+                    {"name": "S3_BUCKET_RESULTS", "value": settings.s3_bucket_results},
+                    {"name": "AWS_REGION", "value": settings.aws_region},
+                ],
+            },
+        )
+        batch_job_id = response["jobId"]
+        job["batch_job_id"] = batch_job_id
+        _jobs_store[job_id] = job
+        logger.info("Submitted Batch job %s for pipeline job %s", batch_job_id, job_id)
+
+        # Poll for progress
+        while True:
+            time.sleep(15)
+
+            # Check progress file from worker
+            try:
+                resp = s3.get_object(
+                    Bucket=settings.s3_bucket_results,
+                    Key=f"_jobs/{job_id}_progress.json",
+                )
+                progress = json.loads(resp["Body"].read())
+                job = _jobs_store.get(job_id)
+                if job:
+                    job["current_step"] = progress.get("step", job.get("current_step"))
+                    job["pct_complete"] = progress.get("pct_complete", 0)
+                    _jobs_store[job_id] = job
+
+                    _broadcast_sync(job_id, {
+                        "type": "step_update",
+                        "step": progress["step"],
+                        "message": progress.get("message", ""),
+                        "pct_complete": progress["pct_complete"],
+                    })
+            except Exception:
+                pass  # progress file not yet written
+
+            # Check if Batch job is done
+            try:
+                desc = batch.describe_jobs(jobs=[batch_job_id])
+                status = desc["jobs"][0]["status"] if desc["jobs"] else "UNKNOWN"
+            except Exception:
+                status = "UNKNOWN"
+
+            if status in ("SUCCEEDED", "FAILED"):
+                break
+
+        # Load results from S3
+        if status == "SUCCEEDED":
+            try:
+                resp = s3.get_object(
+                    Bucket=settings.s3_bucket_results,
+                    Key=f"_jobs/{job_id}.json",
+                )
+                result_data = json.loads(resp["Body"].read())
+                job = _jobs_store.get(job_id)
+                if job:
+                    job["status"] = "completed"
+                    job["current_step"] = None
+                    job["pct_complete"] = 100.0
+                    job["results"] = result_data.get("results", {})
+                    _jobs_store[job_id] = job
+
+                    _broadcast_sync(job_id, {
+                        "type": "pipeline_complete",
+                        "pct_complete": 100.0,
+                        "message": "Pipeline complete! Real results are ready.",
+                    })
+            except Exception as e:
+                logger.error("Failed to load results for job %s: %s", job_id, e)
+        else:
+            job = _jobs_store.get(job_id)
+            if job:
+                job["status"] = "failed"
+                job["current_step"] = "error"
+                _jobs_store[job_id] = job
+                _broadcast_sync(job_id, {
+                    "type": "pipeline_error",
+                    "message": f"Pipeline failed (Batch status: {status})",
+                })
+
+    except Exception as e:
+        logger.error("Failed to launch real pipeline for job %s: %s", job_id, e)
+        # Fall back to simulation
+        _simulate_pipeline(job_id)
 
 
 def _simulate_pipeline(job_id: str):
@@ -1921,6 +2049,29 @@ async def interpretation_data(job_id: str):
     if not state or not state.get("results"):
         raise HTTPException(status_code=404)
     return state["results"]["interpretation"]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline progress callback (called by Batch worker)
+# ---------------------------------------------------------------------------
+
+@api_app.post("/api/jobs/{job_id}/progress")
+async def pipeline_progress(job_id: str, request: Request):
+    """Receive progress updates from the Batch pipeline worker."""
+    body = await request.json()
+    job = _jobs_store.get(job_id)
+    if job:
+        job["current_step"] = body.get("step", job.get("current_step"))
+        job["pct_complete"] = body.get("pct_complete", 0)
+        _jobs_store[job_id] = job
+
+        _broadcast_sync(job_id, {
+            "type": "step_update",
+            "step": body["step"],
+            "message": body.get("message", ""),
+            "pct_complete": body["pct_complete"],
+        })
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

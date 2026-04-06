@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     s3_bucket_reports: str = "rnascope-reports"
     batch_job_queue: str = "rnascope-queue"
     batch_job_definition: str = "rnascope-job-def"
+    ecr_image_uri: str = ""  # Docker image for pipeline worker
+    salmon_index_s3_prefix: str = "s3://rnascope-references/salmon-index/"
     efs_mount_path: str = "/mnt/efs/rnascope"
     star_genome_index_s3: str = "s3://rnascope-references/star-index/hg38/"
     ensembl_gtf_s3: str = "s3://rnascope-references/gtf/Homo_sapiens.GRCh38.110.gtf.gz"
