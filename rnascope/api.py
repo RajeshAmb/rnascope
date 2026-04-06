@@ -48,67 +48,111 @@ _JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class _PersistentJobStore:
-    """Dict-like store that persists each job as a JSON file on disk."""
+    """Dict-like store: local disk cache + S3 for persistence across deploys."""
+
+    _S3_PREFIX = "_jobs/"  # S3 key prefix for job state files
 
     def __init__(self, directory: Path):
         self._dir = directory
+        self._s3_ok = False
+        self._s3_bucket = ""
+        self._boot_sync_done = False
+        try:
+            if settings.aws_access_key_id and settings.s3_bucket_results:
+                self._s3_bucket = settings.s3_bucket_results
+                self._s3_ok = True
+        except Exception:
+            pass
 
     def _path(self, job_id: str) -> Path:
         return self._dir / f"{job_id}.json"
 
-    def __contains__(self, job_id: str) -> bool:
-        return self._path(job_id).exists()
+    def _s3_key(self, job_id: str) -> str:
+        return f"{self._S3_PREFIX}{job_id}.json"
+
+    def _s3_get(self, job_id: str):
+        """Try to load job state from S3."""
+        if not self._s3_ok:
+            return None
+        try:
+            from rnascope.infra.aws import _get_s3
+            s3 = _get_s3()
+            resp = s3.get_object(Bucket=self._s3_bucket, Key=self._s3_key(job_id))
+            return json.loads(resp["Body"].read())
+        except Exception:
+            return None
+
+    def _s3_put(self, job_id: str, state: dict):
+        """Persist job state to S3."""
+        if not self._s3_ok:
+            return
+        try:
+            from rnascope.infra.aws import _get_s3
+            s3 = _get_s3()
+            s3.put_object(
+                Bucket=self._s3_bucket,
+                Key=self._s3_key(job_id),
+                Body=json.dumps(state, default=str),
+                ContentType="application/json",
+            )
+        except Exception as e:
+            logger.warning("Failed to sync job %s to S3: %s", job_id, e)
+
+    def _boot_sync(self):
+        """On first access, load all jobs from S3 into local cache."""
+        if self._boot_sync_done or not self._s3_ok:
+            self._boot_sync_done = True
+            return
+        self._boot_sync_done = True
+        try:
+            from rnascope.infra.aws import _get_s3
+            s3 = _get_s3()
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self._s3_bucket, Prefix=self._S3_PREFIX):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    job_id = key.replace(self._S3_PREFIX, "").replace(".json", "")
+                    if not self._path(job_id).exists():
+                        try:
+                            resp = s3.get_object(Bucket=self._s3_bucket, Key=key)
+                            state = json.loads(resp["Body"].read())
+                            self._path(job_id).write_text(json.dumps(state), encoding="utf-8")
+                        except Exception:
+                            continue
+            logger.info("Boot sync: loaded jobs from S3 into local cache")
+        except Exception as e:
+            logger.warning("Boot sync from S3 failed: %s", e)
 
     def get(self, job_id: str, default=None):
         try:
             return self[job_id]
         except KeyError:
-            # Fallback to Redis for recovery
-            try:
-                from rnascope.infra.checkpoint import get_job_state
-                state = get_job_state(job_id)
-                if state:
-                    self[job_id] = state # Restore to local disk
-                    return state
-            except Exception:
-                pass
             return default
 
     def __getitem__(self, job_id: str) -> dict:
+        self._boot_sync()
         p = self._path(job_id)
-        if not p.exists():
-            # Check Redis before failing
-            try:
-                from rnascope.infra.checkpoint import get_job_state
-                state = get_job_state(job_id)
-                if state:
-                    self[job_id] = state # Restore to local disk
-                    return state
-            except Exception:
-                pass
-            raise KeyError(job_id)
-        return json.loads(p.read_text(encoding="utf-8"))
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+        # Fallback: check S3 directly
+        state = self._s3_get(job_id)
+        if state:
+            p.write_text(json.dumps(state), encoding="utf-8")
+            return state
+        raise KeyError(job_id)
 
     def __setitem__(self, job_id: str, state: dict):
-        self._path(job_id).write_text(json.dumps(state), encoding="utf-8")
-        # Sync to Redis for persistence across restarts/workers
-        try:
-            from rnascope.infra.checkpoint import save_job_state
-            save_job_state(job_id, state)
-        except Exception as e:
-            logger.warning("Failed to sync job %s to Redis: %s", job_id, e)
+        self._path(job_id).write_text(json.dumps(state, default=str), encoding="utf-8")
+        self._s3_put(job_id, state)
 
     def __contains__(self, job_id: str) -> bool:
+        self._boot_sync()
         if self._path(job_id).exists():
             return True
-        # Check Redis
-        try:
-            from rnascope.infra.checkpoint import get_job_state
-            return get_job_state(job_id) is not None
-        except Exception:
-            return False
+        return self._s3_get(job_id) is not None
 
     def items(self):
+        self._boot_sync()
         for p in self._dir.glob("*.json"):
             job_id = p.stem
             try:
@@ -1756,16 +1800,28 @@ def _broadcast_sync(job_id: str, message: dict):
 
 @api_app.get("/api/jobs")
 async def list_jobs():
-    """List all jobs."""
+    """List all jobs from the last 90 days."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
     jobs = []
     for jid, state in _jobs_store.items():
+        created = state.get("created_at", "")
+        # Filter to last 90 days
+        if created and created < cutoff:
+            continue
         jobs.append({
             "job_id": jid,
             "project_name": state.get("project_name", ""),
+            "species": state.get("species", ""),
+            "condition_a": state.get("condition_a", ""),
+            "condition_b": state.get("condition_b", ""),
             "status": state.get("status", "unknown"),
             "pct_complete": state.get("pct_complete", 0),
             "n_samples": state.get("n_samples", 0),
-            "created_at": state.get("created_at", ""),
+            "n_files": len(state.get("files", [])),
+            "dataset_size_gb": state.get("dataset_size_gb", 0),
+            "created_at": created,
+            "files_expire_at": state.get("files_expire_at", ""),
         })
     return {"jobs": sorted(jobs, key=lambda j: j["created_at"], reverse=True)}
 
