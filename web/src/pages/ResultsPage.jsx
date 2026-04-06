@@ -643,7 +643,7 @@ export default function ResultsPage() {
         <div className="text-center py-16 text-gray-500">No results available yet.</div>
       )}
 
-      <ChatPanel jobId={jobId} />
+      <ChatPanel jobId={jobId} results={results} />
     </div>
   )
 }
