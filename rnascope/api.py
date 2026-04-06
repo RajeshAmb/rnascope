@@ -845,6 +845,177 @@ def _generate_demo_results(job_id: str, species: str = "human",
                 "drug": random.choice(drug_list),
             })
 
+    # --------------- Plant-specific enrichment (PlantCyc, MapMan, PlantTFDB) ---------------
+    plant_enrichment = None
+    if domain == "plant":
+        plantcyc_pathways = [
+            "Flavonoid Biosynthesis", "Phenylpropanoid Biosynthesis", "Jasmonate Biosynthesis",
+            "Salicylate Biosynthesis", "Ethylene Biosynthesis", "ABA Biosynthesis",
+            "Carotenoid Biosynthesis", "Chlorophyll Biosynthesis", "Lignin Biosynthesis",
+            "Starch Biosynthesis", "Sucrose Biosynthesis", "Cellulose Biosynthesis",
+        ]
+        mapman_bins = [
+            "PS.lightreaction", "PS.calvin cycle", "cell.cycle", "stress.abiotic.drought",
+            "stress.biotic", "hormone.jasmonate", "hormone.salicylate", "signaling.MAP kinase",
+            "cell wall.synthesis", "protein.synthesis", "lipid metabolism", "secondary metabolism",
+            "transport.sugars", "N-metabolism", "amino acid metabolism",
+        ]
+        tf_families_plant = ["WRKY", "MYB", "NAC", "bHLH", "ERF", "bZIP", "MADS", "ARF", "GRAS", "HD-ZIP"]
+
+        plant_enrichment = {
+            "plantcyc": [
+                {
+                    "name": p,
+                    "count": random.randint(4, 20),
+                    "neg_log10_pvalue": round(random.uniform(1.5, 8.0), 2),
+                    "pvalue": round(10 ** (-random.uniform(1.5, 8.0)), 8),
+                    "direction": random.choice(["up", "down", "up", "up"]),
+                }
+                for p in plantcyc_pathways
+            ],
+            "mapman": [
+                {
+                    "name": b,
+                    "count": random.randint(5, 25),
+                    "neg_log10_pvalue": round(random.uniform(1.2, 7.5), 2),
+                    "pvalue": round(10 ** (-random.uniform(1.2, 7.5)), 8),
+                    "direction": random.choice(["up", "down", "up"]),
+                }
+                for b in mapman_bins
+            ],
+            "plantTFDB": [
+                {
+                    "name": f,
+                    "count": random.randint(3, 18),
+                    "neg_log10_pvalue": round(random.uniform(1.0, 6.5), 2),
+                    "pvalue": round(10 ** (-random.uniform(1.0, 6.5)), 8),
+                    "direction": "up",
+                }
+                for f in tf_families_plant
+            ],
+        }
+
+    # --------------- TF enrichment / upstream regulators ---------------
+    tf_family_bank = {
+        "plant": ["WRKY", "MYB", "NAC", "bHLH", "ERF", "bZIP", "MADS", "ARF", "GRAS", "HD-ZIP", "DOF", "C2H2"],
+        "animal": ["AP-1", "NF-kB", "p53", "STAT3", "HIF-1a", "YAP/TAZ", "SMAD", "E2F", "SP1", "CEBP", "IRF3", "GATA"],
+        "microbe": ["LexA", "OmpR", "CRP", "FNR", "RpoS", "SoxR", "OxyR", "PhoB", "NtrC", "AraC", "LacI", "TrpR"],
+    }
+    tf_top_genes_bank = {
+        "plant": {
+            "WRKY": ["WRKY33", "WRKY40", "WRKY70", "WRKY22"],
+            "MYB": ["MYB51", "MYB75", "MYB4", "MYB36"],
+            "NAC": ["ANAC055", "ANAC019", "VND7", "NST1"],
+            "bHLH": ["MYC2", "MYC3", "GL3", "EGL3"],
+            "ERF": ["ERF1", "ERF6", "ERF98", "ERF105"],
+            "bZIP": ["TGA2", "TGA5", "HY5", "ABF2"],
+            "MADS": ["SVP", "AGL15", "AGL24", "SOC1"],
+            "ARF": ["ARF7", "ARF19", "ARF5", "ARF2"],
+            "GRAS": ["SCR", "SHR", "PAT1", "SCL3"],
+            "HD-ZIP": ["HB7", "ATHB12", "PDF2", "GLABRA2"],
+            "DOF": ["DOF1.1", "DOF2.1", "OBP2", "COG1"],
+            "C2H2": ["STZ", "ZFP6", "ZAT10", "ZAT12"],
+        },
+        "animal": {
+            "AP-1": ["FOS", "JUN", "FOSL1", "JUNB"],
+            "NF-kB": ["RELA", "RELB", "NFKB1", "NFKB2"],
+            "p53": ["TP53", "TP63", "TP73", "MDM2"],
+            "STAT3": ["STAT3", "STAT1", "STAT6", "JAK2"],
+            "HIF-1a": ["HIF1A", "HIF2A", "EPAS1", "ARNT"],
+            "YAP/TAZ": ["YAP1", "WWTR1", "TEAD1", "TEAD4"],
+            "SMAD": ["SMAD3", "SMAD4", "SMAD2", "TGFBR1"],
+            "E2F": ["E2F1", "E2F3", "CDKN1A", "RB1"],
+            "SP1": ["SP1", "SP3", "KLF4", "KLF5"],
+            "CEBP": ["CEBPB", "CEBPA", "CEBPD", "CEBPE"],
+            "IRF3": ["IRF3", "IRF7", "IRF1", "MAVS"],
+            "GATA": ["GATA3", "GATA6", "GATA1", "GATA2"],
+        },
+        "microbe": {
+            fam: [f"{fam}_target{i}" for i in range(1, 5)] for fam in ["LexA", "OmpR", "CRP", "FNR", "RpoS", "SoxR", "OxyR", "PhoB", "NtrC", "AraC", "LacI", "TrpR"]
+        },
+    }
+    tf_families = tf_family_bank.get(domain, tf_family_bank["animal"])
+    tf_tops = tf_top_genes_bank.get(domain, {})
+    tf_enrichment_data = {
+        "tf_families": [
+            {
+                "family": f,
+                "target_count": random.randint(8, 60),
+                "enrichment_score": round(random.uniform(1.0, 4.5), 3),
+                "neg_log10_pvalue": round(random.uniform(1.0, 7.0), 2),
+                "pvalue": round(10 ** (-random.uniform(1.0, 7.0)), 8),
+                "fdr": round(10 ** (-random.uniform(0.5, 5.0)), 8),
+                "top_genes": tf_tops.get(f, [f"{f}1", f"{f}2", f"{f}3"])[:4],
+            }
+            for f in tf_families
+        ]
+    }
+
+    # --------------- Methods text auto-generation ---------------
+    alignment_tool = "STAR (v2.7.10a)"
+    genome_ref_map = {
+        "human": "GRCh38 (Ensembl release 110)",
+        "mouse": "GRCm39 (Ensembl release 110)",
+        "arabidopsis": "TAIR10 (Araport11)",
+        "rice": "IRGSP-1.0 (RAP-DB)",
+        "maize": "B73 RefGen_v5",
+        "tomato": "SL4.0 (ITAG4.1)",
+        "cotton": "TM-1 (AD1) v2.1",
+        "cotton_arboreum": "G. arboreum (CGP-BGI v1.1)",
+        "ecoli": "K-12 MG1655 (NC_000913.3)",
+        "yeast": "S288C (R64-3-1)",
+    }
+    genome_ref = genome_ref_map.get(species, f"{species} reference genome")
+    quant_tool = "featureCounts (Subread v2.0.6) and Salmon (v1.10.2)"
+    de_tool = "DESeq2 (v1.42.0)"
+    enrich_tools = "clusterProfiler (v4.10.0) for GO/KEGG"
+    if domain == "plant":
+        enrich_tools += ", PlantCyc (PMN v17.0), MapMan (v4.0), and PlantTFDB (v5.0)"
+    ml_tools = "Random Forest (scikit-learn v1.4), SVM with RFE, and LASSO regression (glmnet)"
+
+    methods_text_str = (
+        f"Raw reads were quality-trimmed using Trimmomatic (v0.39) and quality-assessed with FastQC (v0.12). "
+        f"Reads were aligned to the {genome_ref} genome using {alignment_tool} with default parameters for paired-end sequencing. "
+        f"Gene-level read counts were quantified using {quant_tool}. "
+        f"Transcript-level abundances (TPM) were estimated using Salmon with selective alignment. "
+        f"Differential expression analysis comparing {condition_a} versus {condition_b} was performed using {de_tool} "
+        f"with default model fitting. Genes with |log2FC| > 1 and FDR < 0.05 (Benjamini-Hochberg correction) "
+        f"were considered differentially expressed. "
+        f"Functional enrichment analysis was carried out using {enrich_tools}. "
+        f"Gene co-expression network analysis was performed using WGCNA (v1.72). "
+        f"ML-based biomarker selection was performed using {ml_tools} with 5-fold cross-validation. "
+        f"All statistical analyses were performed in R (v4.3.2) and Python (v3.11). "
+        f"The {species} RNA-seq experiment comprised {n_a} {condition_a} and {n_b} {condition_b} biological replicates "
+        f"with a total of {n_samples} samples."
+    )
+
+    methods_data = {
+        "text": methods_text_str,
+        "tools": [
+            {"name": "Trimmomatic", "version": "0.39", "purpose": "Read trimming & QC", "citation": "Bolger et al., Bioinformatics 2014"},
+            {"name": "FastQC", "version": "0.12", "purpose": "Quality assessment", "citation": "Andrews S., Babraham Bioinformatics 2010"},
+            {"name": "STAR", "version": "2.7.10a", "purpose": "Read alignment", "citation": "Dobin et al., Bioinformatics 2013"},
+            {"name": "featureCounts", "version": "2.0.6", "purpose": "Gene-level quantification", "citation": "Liao et al., Bioinformatics 2014"},
+            {"name": "Salmon", "version": "1.10.2", "purpose": "Transcript-level quantification", "citation": "Patro et al., Nature Methods 2017"},
+            {"name": "DESeq2", "version": "1.42.0", "purpose": "Differential expression", "citation": "Love et al., Genome Biology 2014"},
+            {"name": "clusterProfiler", "version": "4.10.0", "purpose": "GO/KEGG enrichment", "citation": "Wu et al., The Innovation 2021"},
+            {"name": "WGCNA", "version": "1.72", "purpose": "Co-expression networks", "citation": "Langfelder & Horvath, BMC Bioinformatics 2008"},
+            {"name": "scikit-learn", "version": "1.4", "purpose": "ML biomarker selection", "citation": "Pedregosa et al., JMLR 2011"},
+        ],
+        "parameters": {
+            "FDR_threshold": 0.05,
+            "log2FC_threshold": 1.0,
+            "min_count": 10,
+            "normalization": "DESeq2 VST",
+            "species": species,
+            "genome": genome_ref,
+            "condition_A": condition_a,
+            "condition_B": condition_b,
+            "n_replicates_A": n_a,
+            "n_replicates_B": n_b,
+        },
+    }
+
     return {
         "domain": domain,
         "species": species,
@@ -871,6 +1042,9 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "time_series": time_series_data,
         "annotations": annotations,
         "biomarkers": _generate_biomarker_results(volcano_data, condition_a, condition_b, domain),
+        "plant_enrichment": plant_enrichment,
+        "tf_enrichment": tf_enrichment_data,
+        "methods_text": methods_data,
     }
 
 
@@ -1699,11 +1873,31 @@ async def interpretation_data(job_id: str):
 
 @api_app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
-    if req.job_id not in _chat_sessions:
-        _chat_sessions[req.job_id] = ChatAgent(req.job_id)
-    agent = _chat_sessions[req.job_id]
-    answer = agent.ask(req.question)
-    return ChatResponse(job_id=req.job_id, answer=answer)
+    try:
+        if req.job_id not in _chat_sessions:
+            _chat_sessions[req.job_id] = ChatAgent(req.job_id)
+        agent = _chat_sessions[req.job_id]
+        answer = agent.ask(req.question)
+        return ChatResponse(job_id=req.job_id, answer=answer)
+    except Exception as exc:
+        logger.error("Chat error for job %s: %s", req.job_id, exc)
+        # Fallback: answer from results data if Anthropic API fails
+        job = _jobs_store.get(req.job_id)
+        if job and job.get("results"):
+            results = job["results"]
+            q = req.question.lower()
+            if "go" in q and "biological" in q:
+                go_data = results.get("go_enrichment", [])
+                bp_terms = [t for t in go_data if t.get("source") == "GO_BP"]
+                if bp_terms:
+                    lines = ["Here are the top GO Biological Process terms:\n"]
+                    for t in bp_terms[:10]:
+                        lines.append(f"- **{t['term']}** (gene ratio: {t['gene_ratio']:.2f}, {t['count']} genes)")
+                    return ChatResponse(job_id=req.job_id, answer="\n".join(lines))
+            answer = f"I encountered an issue with the AI service. Your job has {len(results.get('volcano', []))} genes analyzed. Please check the results tabs for detailed data."
+        else:
+            answer = "The AI chat service is temporarily unavailable. Please check your results in the tabs above."
+        return ChatResponse(job_id=req.job_id, answer=answer)
 
 
 # ---------------------------------------------------------------------------

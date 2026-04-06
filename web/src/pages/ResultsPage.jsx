@@ -23,6 +23,11 @@ import { MappingRatePlot, ReadDistributionPlot, GeneBodyCoveragePlot } from '../
 import { ExpressionBoxplot, ExpressionDensity, CorrelationHeatmap } from '../components/charts/ExpressionPlots'
 import { MAPlot, DispersionPlot, TimeSeriesPlot } from '../components/charts/DEGAdvancedPlots'
 import BiomarkerPlot from '../components/charts/BiomarkerPlot'
+import GeneBrowser from '../components/charts/GeneBrowser'
+import SampleDistancePlot from '../components/charts/SampleDistancePlot'
+import PlantEnrichment from '../components/charts/PlantEnrichment'
+import TFEnrichment from '../components/charts/TFEnrichment'
+import MethodsText from '../components/charts/MethodsText'
 import { Loader2, Lightbulb, FlaskConical, BookOpen, Download } from 'lucide-react'
 
 const ALL_TABS = [
@@ -38,6 +43,9 @@ const ALL_TABS = [
   { key: 'pathway', label: 'Pathways' },
   { key: 'wgcna', label: 'Network' },
   { key: 'deconv', label: 'Cell Types', domains: ['animal'] },
+  { key: 'browser', label: 'Gene Browser' },
+  { key: 'plant', label: 'Plant Pathways', domains: ['plant'] },
+  { key: 'methods', label: 'Methods' },
   { key: 'interpretation', label: 'AI' },
 ]
 
@@ -182,6 +190,8 @@ export default function ResultsPage() {
   const [results, setResults] = useState(null)
   const [activeTab, setActiveTab] = useState('overview')
   const [loading, setLoading] = useState(true)
+  const [fdrThreshold, setFdrThreshold] = useState(0.05)
+  const [lfcThreshold, setLfcThreshold] = useState(1.0)
   const wsRef = useRef(null)
 
   // Plotly chart refs for image export
@@ -209,6 +219,9 @@ export default function ResultsPage() {
   const maRef = useRef(null)
   const dispRef = useRef(null)
   const timeSeriesRef = useRef(null)
+  const sampleDistRef = useRef(null)
+  const plantEnrichRef = useRef(null)
+  const tfEnrichRef = useRef(null)
 
   useEffect(() => {
     const load = async () => {
@@ -399,6 +412,11 @@ export default function ResultsPage() {
                   <CorrelationHeatmap ref={corrRef} data={results.correlation} />
                 </ChartCard>
               )}
+              {results.correlation && (
+                <ChartCard title="Sample Distance Heatmap" plotRef={sampleDistRef}>
+                  <SampleDistancePlot ref={sampleDistRef} data={results.correlation} />
+                </ChartCard>
+              )}
             </div>
           )}
 
@@ -412,11 +430,67 @@ export default function ResultsPage() {
           {/* ============ DEG TAB ============ */}
           {activeTab === 'deg' && (
             <div className="space-y-6">
+              {/* Threshold controls */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <h3 className="font-semibold text-gray-800 mb-4">Significance Thresholds</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* FDR slider */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-sm font-medium text-gray-700">FDR threshold</label>
+                      <span className="text-sm font-semibold text-brand-700 font-mono">{fdrThreshold}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.001}
+                      max={0.1}
+                      step={0.001}
+                      value={fdrThreshold}
+                      onChange={(e) => setFdrThreshold(parseFloat(e.target.value))}
+                      className="w-full accent-brand-600"
+                    />
+                    <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+                      <span>0.001</span><span>0.1</span>
+                    </div>
+                  </div>
+                  {/* log2FC slider */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-sm font-medium text-gray-700">|log2FC| threshold</label>
+                      <span className="text-sm font-semibold text-brand-700 font-mono">{lfcThreshold.toFixed(1)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={3.0}
+                      step={0.1}
+                      value={lfcThreshold}
+                      onChange={(e) => setLfcThreshold(parseFloat(e.target.value))}
+                      className="w-full accent-brand-600"
+                    />
+                    <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+                      <span>0.5</span><span>3.0</span>
+                    </div>
+                  </div>
+                </div>
+                {/* Live count */}
+                {results.volcano && (
+                  <p className="mt-3 text-sm text-gray-500">
+                    Significant genes at current thresholds:{' '}
+                    <span className="font-bold text-brand-700">
+                      {results.volcano.filter((g) => g.fdr <= fdrThreshold && Math.abs(g.log2fc) >= lfcThreshold).length}
+                    </span>{' '}
+                    /{' '}
+                    <span className="text-gray-600">{results.volcano.length} tested</span>
+                  </p>
+                )}
+              </div>
+
               <ChartCard title="DEG Summary" csvData={degCSV(results.volcano)}>
-                <DEGTable data={results.deg_summary} volcano={results.volcano} />
+                <DEGTable data={results.deg_summary} volcano={results.volcano} fdrThreshold={fdrThreshold} lfcThreshold={lfcThreshold} />
               </ChartCard>
               <ChartCard title="Volcano Plot" plotRef={volcanoRef2} csvData={volcanoCSV(results.volcano)}>
-                <VolcanoPlot ref={volcanoRef2} data={results.volcano} />
+                <VolcanoPlot ref={volcanoRef2} data={results.volcano} fdrThreshold={fdrThreshold} lfcThreshold={lfcThreshold} />
               </ChartCard>
               <ChartCard title="Expression Heatmap" plotRef={heatmapRef} csvData={heatmapCSV(results.heatmap)}>
                 <HeatmapPlot ref={heatmapRef} data={results.heatmap} />
@@ -493,6 +567,38 @@ export default function ResultsPage() {
           {activeTab === 'deconv' && results.deconvolution && (
             <ChartCard title="Cell Type Deconvolution" plotRef={deconvRef} csvData={deconvCSV(results.deconvolution)}>
               <DeconvolutionPlot ref={deconvRef} data={results.deconvolution} />
+            </ChartCard>
+          )}
+
+          {/* ============ GENE BROWSER TAB ============ */}
+          {activeTab === 'browser' && (
+            <ChartCard title="Gene Expression Browser">
+              <GeneBrowser data={results.heatmap} />
+            </ChartCard>
+          )}
+
+          {/* ============ PLANT PATHWAYS TAB ============ */}
+          {activeTab === 'plant' && (
+            <div className="space-y-6">
+              {results.plant_enrichment ? (
+                <ChartCard title="Plant-specific Pathway Enrichment" plotRef={plantEnrichRef}>
+                  <PlantEnrichment ref={plantEnrichRef} data={results.plant_enrichment} />
+                </ChartCard>
+              ) : (
+                <div className="text-center py-10 text-gray-400">Plant enrichment data not available.</div>
+              )}
+              {results.tf_enrichment && (
+                <ChartCard title="Transcription Factor Enrichment" plotRef={tfEnrichRef}>
+                  <TFEnrichment ref={tfEnrichRef} data={results.tf_enrichment} />
+                </ChartCard>
+              )}
+            </div>
+          )}
+
+          {/* ============ METHODS TAB ============ */}
+          {activeTab === 'methods' && (
+            <ChartCard title="Methods">
+              <MethodsText data={results.methods_text} />
             </ChartCard>
           )}
 

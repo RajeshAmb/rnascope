@@ -1,12 +1,19 @@
 import { forwardRef } from 'react'
 import Plot from '../../PlotlyChart'
 
-const VolcanoPlot = forwardRef(function VolcanoPlot({ data }, ref) {
+const VolcanoPlot = forwardRef(function VolcanoPlot({ data, fdrThreshold = 0.05, lfcThreshold = 1.0 }, ref) {
   if (!data || data.length === 0) return null
 
-  const up = data.filter((d) => d.direction === 'up')
-  const down = data.filter((d) => d.direction === 'down')
-  const ns = data.filter((d) => d.direction === 'ns')
+  // Apply thresholds to determine point classification
+  const classify = (d) => {
+    const sig = d.fdr <= fdrThreshold && Math.abs(d.log2fc) >= lfcThreshold
+    if (!sig) return 'ns'
+    return d.log2fc > 0 ? 'up' : 'down'
+  }
+
+  const up = data.filter((d) => classify(d) === 'up')
+  const down = data.filter((d) => classify(d) === 'down')
+  const ns = data.filter((d) => classify(d) === 'ns')
 
   const topGenes = [...data]
     .filter((d) => d.significant)
@@ -49,9 +56,9 @@ const VolcanoPlot = forwardRef(function VolcanoPlot({ data }, ref) {
         xaxis: { title: 'log2 Fold Change', zeroline: true, zerolinecolor: '#e5e7eb' },
         yaxis: { title: '-log10(p-value)' },
         shapes: [
-          { type: 'line', x0: -1, x1: -1, y0: 0, y1: 1, yref: 'paper', line: { dash: 'dot', color: '#9ca3af' } },
-          { type: 'line', x0: 1, x1: 1, y0: 0, y1: 1, yref: 'paper', line: { dash: 'dot', color: '#9ca3af' } },
-          { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: -Math.log10(0.05), y1: -Math.log10(0.05), line: { dash: 'dot', color: '#9ca3af' } },
+          { type: 'line', x0: -lfcThreshold, x1: -lfcThreshold, y0: 0, y1: 1, yref: 'paper', line: { dash: 'dot', color: '#9ca3af' } },
+          { type: 'line', x0: lfcThreshold, x1: lfcThreshold, y0: 0, y1: 1, yref: 'paper', line: { dash: 'dot', color: '#9ca3af' } },
+          { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: -Math.log10(fdrThreshold), y1: -Math.log10(fdrThreshold), line: { dash: 'dot', color: '#9ca3af' } },
         ],
         annotations,
         legend: { x: 0.02, y: 0.98 },

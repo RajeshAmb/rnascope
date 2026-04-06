@@ -1,15 +1,23 @@
 import { ArrowUp, ArrowDown } from 'lucide-react'
 
-export default function DEGTable({ data, volcano }) {
+export default function DEGTable({ data, volcano, fdrThreshold, lfcThreshold }) {
   if (!data) return null
+
+  const fdr = fdrThreshold ?? data.fdr_threshold ?? 0.05
+  const lfc = lfcThreshold ?? data.fc_threshold ?? 1.0
 
   // Get top significant genes from volcano data sorted by fold change
   const topGenes = volcano
     ? [...volcano]
-        .filter((g) => g.significant)
+        .filter((g) => g.fdr <= fdr && Math.abs(g.log2fc) >= lfc)
         .sort((a, b) => Math.abs(b.log2fc) - Math.abs(a.log2fc))
         .slice(0, 20)
     : []
+
+  // Dynamic counts based on thresholds
+  const filteredUp = volcano ? volcano.filter((g) => g.fdr <= fdr && g.log2fc >= lfc).length : data.upregulated
+  const filteredDown = volcano ? volcano.filter((g) => g.fdr <= fdr && g.log2fc <= -lfc).length : data.downregulated
+  const filteredSig = filteredUp + filteredDown
 
   return (
     <div>
@@ -23,24 +31,24 @@ export default function DEGTable({ data, volcano }) {
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
           <p className="text-sm text-gray-500">Significant DEGs</p>
-          <p className="text-2xl font-bold text-purple-600">{data.significant}</p>
+          <p className="text-2xl font-bold text-purple-600">{filteredSig}</p>
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
           <p className="text-sm text-gray-500 flex items-center gap-1">
             <ArrowUp className="w-3 h-3 text-red-500" /> Upregulated
           </p>
-          <p className="text-2xl font-bold text-red-600">{data.upregulated}</p>
+          <p className="text-2xl font-bold text-red-600">{filteredUp}</p>
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
           <p className="text-sm text-gray-500 flex items-center gap-1">
             <ArrowDown className="w-3 h-3 text-blue-500" /> Downregulated
           </p>
-          <p className="text-2xl font-bold text-blue-600">{data.downregulated}</p>
+          <p className="text-2xl font-bold text-blue-600">{filteredDown}</p>
         </div>
       </div>
 
       <p className="text-xs text-gray-500 mb-4">
-        Thresholds: FDR &lt; {data.fdr_threshold} | |log2FC| &gt; {data.fc_threshold}
+        Thresholds: FDR &lt; {fdr} | |log2FC| &gt; {lfc}
       </p>
 
       {/* Top DEGs table */}
