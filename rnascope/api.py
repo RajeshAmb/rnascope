@@ -460,7 +460,7 @@ def _generate_demo_results(job_id: str, species: str = "human",
 
     # QC summary
     qc_summary = {
-        "total_samples": 6,
+        "total_samples": n_samples,
         "total_reads_m": round(random.uniform(180, 250), 1),
         "avg_q30": round(random.uniform(92, 97), 1),
         "avg_mapping_rate": round(random.uniform(85, 95), 1),
@@ -1175,6 +1175,88 @@ async def sync_s3_files(job_id: str):
     }
 
 
+@api_app.post("/api/jobs/{job_id}/rerun")
+async def rerun_job(job_id: str):
+    """Re-run pipeline using files already in S3 (no re-upload needed).
+
+    Creates a new job that references the same S3 files as the original.
+    Files are kept for 60 days after the original upload.
+    """
+    if job_id not in _jobs_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    old_job = _jobs_store[job_id]
+
+    # Check if files still exist
+    expire_at = old_job.get("files_expire_at")
+    if expire_at:
+        from datetime import datetime as _dt
+        if _dt.fromisoformat(expire_at) < _dt.now(timezone.utc):
+            raise HTTPException(status_code=410, detail="Files have expired. Please re-upload.")
+
+    # Create new job with same metadata but fresh state
+    new_job_id = str(uuid.uuid4())[:12]
+    new_job = {
+        **old_job,
+        "job_id": new_job_id,
+        "status": "uploading",
+        "current_step": "uploading",
+        "steps_completed": [],
+        "pct_complete": 0,
+        "cost_so_far_usd": 0.0,
+        "results": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_job_id": job_id,
+    }
+    _jobs_store[new_job_id] = new_job
+
+    # Copy S3 file references (files are still in S3 under original job_id)
+    if S3_UPLOAD_ENABLED:
+        from rnascope.infra.aws import s3_list_objects
+        bucket = settings.s3_bucket_raw
+        objects = s3_list_objects(bucket, f"{job_id}/")
+        for obj in objects:
+            filename = obj["key"].split("/", 1)[-1]
+            if filename:
+                _register_file(new_job_id, filename, obj["size"])
+
+    return {"new_job_id": new_job_id, "files_reused": len(new_job.get("files", [])), "source_job_id": job_id}
+
+
+def _detect_samples(files: list[str]) -> list[dict]:
+    """Detect paired-end samples from filenames.
+
+    Handles patterns like:
+      sample_1.fq.gz / sample_2.fq.gz
+      sample_R1.fq.gz / sample_R2.fq.gz
+      sample_R1_001.fastq.gz / sample_R2_001.fastq.gz
+    """
+    import re
+    # Strip to base name (remove path prefix if any)
+    basenames = [f.split("/")[-1] for f in files]
+
+    # Group by sample: remove _1/_2, _R1/_R2 suffixes
+    sample_map: dict[str, list[str]] = {}
+    for fname in basenames:
+        # Skip metadata files
+        if Path(fname).suffix.lower() in _METADATA_EXTS:
+            continue
+        # Extract sample ID by removing read pair indicator
+        sample_id = re.sub(r'[._](?:R?[12])(?:[._]001)?\.(?:fq|fastq)\.gz$', '', fname, flags=re.IGNORECASE)
+        if sample_id not in sample_map:
+            sample_map[sample_id] = []
+        sample_map[sample_id].append(fname)
+
+    samples = []
+    for sid, fnames in sorted(sample_map.items()):
+        samples.append({
+            "sample_id": sid,
+            "files": sorted(fnames),
+            "paired": len(fnames) >= 2,
+        })
+    return samples
+
+
 @api_app.post("/api/jobs/{job_id}/start")
 async def start_job(job_id: str):
     """Start the pipeline after all files have been uploaded."""
@@ -1184,6 +1266,18 @@ async def start_job(job_id: str):
     job = _jobs_store[job_id]
     if not job["files"]:
         raise HTTPException(status_code=400, detail="No files uploaded yet")
+
+    # Auto-detect samples from uploaded filenames
+    detected = _detect_samples(job["files"])
+    n_detected = len(detected)
+    if n_detected > 0:
+        job["detected_samples"] = detected
+        job["n_samples"] = n_detected
+        # Split evenly between conditions if user didn't specify correctly
+        if job.get("n_a", 0) + job.get("n_b", 0) != n_detected:
+            job["n_a"] = n_detected // 2
+            job["n_b"] = n_detected - n_detected // 2
+            logger.info("Auto-detected %d samples from %d files for job %s", n_detected, len(job["files"]), job_id)
 
     job["status"] = "running"
     job["current_step"] = "ingestion"
@@ -1258,14 +1352,11 @@ def _simulate_pipeline(job_id: str):
             "message": "Pipeline complete! Results are ready.",
         })
 
-        # Auto-cleanup: delete raw FASTQ files from S3 to save storage costs
-        try:
-            from rnascope.config import settings as _settings
-            from rnascope.infra.aws import s3_delete_prefix
-            deleted = s3_delete_prefix(_settings.s3_bucket_raw, f"{job_id}/")
-            logger.info("Auto-cleanup: deleted %d raw files from S3 for job %s", deleted, job_id)
-        except Exception as exc:
-            logger.warning("S3 cleanup failed for job %s: %s", job_id, exc)
+        # Keep raw files for 60 days so users can re-run without re-uploading.
+        # S3 lifecycle policy handles deletion after 60 days.
+        job["files_expire_at"] = (datetime.now(timezone.utc) + __import__("datetime").timedelta(days=60)).isoformat()
+        _jobs_store[job_id] = job
+        logger.info("Raw files for job %s retained until %s", job_id, job["files_expire_at"])
 
 
 def _broadcast_sync(job_id: str, message: dict):
