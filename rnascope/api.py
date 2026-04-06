@@ -794,6 +794,57 @@ def _generate_demo_results(job_id: str, species: str = "human",
         ],
     }
 
+    # Gene annotations for the annotation table
+    _biotype_pool = ["protein_coding", "lncRNA", "protein_coding", "protein_coding",
+                     "processed_pseudogene", "snRNA", "protein_coding", "miRNA"]
+    _go_bp_pool = {
+        "plant": [
+            "defense response", "response to water deprivation", "jasmonic acid signaling",
+            "salicylic acid signaling", "cell wall organization", "phenylpropanoid biosynthesis",
+            "flavonoid biosynthesis", "photosynthesis", "response to cold", "response to ABA",
+            "lignin biosynthesis", "oxidative stress response", "kinase signaling",
+        ],
+        "animal": [
+            "inflammatory response", "immune system process", "cytokine signaling",
+            "leukocyte migration", "ECM organization", "cell adhesion", "apoptosis",
+            "NF-kB signaling", "antigen presentation", "T cell activation",
+            "wound healing", "angiogenesis", "lipid metabolism",
+        ],
+        "microbe": [
+            "metabolic process", "oxidation-reduction", "transmembrane transport",
+            "DNA repair", "stress response", "cell division", "translation",
+            "biofilm formation", "quorum sensing", "amino acid biosynthesis",
+            "carbohydrate metabolism", "protein folding", "chemotaxis",
+        ],
+    }
+    _disease_pool = {
+        "plant": ["Fusarium wilt resistance", "drought tolerance", "salt stress", "pathogen defense",
+                  "herbivore resistance", "heat tolerance", "cold acclimation", None, None],
+        "animal": ["IBD", "colorectal cancer", "rheumatoid arthritis", "fibrosis",
+                   "atherosclerosis", "diabetes", "autoimmune", None, None],
+        "microbe": ["antibiotic resistance", "virulence", "biofilm", "pathogenesis", None, None, None],
+    }
+    _drug_pool = {
+        "plant": [None, None, None, "Fungicide target", "Herbicide target", None],
+        "animal": ["Infliximab", "Adalimumab", None, "Tocilizumab", None, None, "Pembrolizumab", None],
+        "microbe": ["Ciprofloxacin", "Rifampicin", None, None, "Ampicillin", None, None],
+    }
+
+    go_bp_list = _go_bp_pool.get(domain, _go_bp_pool["animal"])
+    disease_list = _disease_pool.get(domain, _disease_pool["animal"])
+    drug_list = _drug_pool.get(domain, _drug_pool["animal"])
+
+    annotations = []
+    for g in volcano_data:
+        if g.get("significant"):
+            annotations.append({
+                "gene": g["gene"],
+                "biotype": random.choice(_biotype_pool),
+                "go_bp": random.choice(go_bp_list),
+                "disease": random.choice(disease_list),
+                "drug": random.choice(drug_list),
+            })
+
     return {
         "domain": domain,
         "species": species,
@@ -818,6 +869,7 @@ def _generate_demo_results(job_id: str, species: str = "human",
         "ma_plot": ma_data,
         "dispersion": dispersion_data,
         "time_series": time_series_data,
+        "annotations": annotations,
     }
 
 

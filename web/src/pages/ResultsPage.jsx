@@ -457,7 +457,7 @@ export default function ResultsPage() {
           {/* ============ ANNOTATION TAB ============ */}
           {activeTab === 'annotation' && (
             <ChartCard title="Functional Annotation" csvData={degCSV(results.volcano)}>
-              <AnnotationTable volcano={results.volcano} />
+              <AnnotationTable volcano={results.volcano} annotations={results.annotations} />
             </ChartCard>
           )}
 
