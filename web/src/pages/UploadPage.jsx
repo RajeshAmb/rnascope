@@ -4,7 +4,7 @@ import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, X, Loader2, FlaskConical, Table } from 'lucide-react'
 import { initJob, uploadFile, uploadFileS3, startJob, getUploadMode } from '../api'
 
-const MAX_PARALLEL_FILES = 1
+const MAX_PARALLEL_FILES = 2 // upload 2 files simultaneously
 
 export default function UploadPage() {
   const navigate = useNavigate()
@@ -101,26 +101,31 @@ export default function UploadPage() {
       let filesDone = 0
 
       const uploader = useS3 ? uploadFileS3 : uploadFile
-      // Upload one file at a time — sequential for connection stability
-      for (const file of queue) {
-        await uploader(
-          job_id,
-          file,
-          (fraction) => {
-            fileProgress[file.name] = Math.round(fraction * 100)
-            setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, retryInfo: null }))
-          },
-          (retry) => {
-            setUploadState((s) => ({
-              ...s,
-              retryInfo: `${file.name}: retry ${retry.attempt}/${retry.max} (chunk ${retry.chunk}/${retry.totalChunks}) — waiting ${Math.round(retry.waitMs / 1000)}s`,
-            }))
-          }
-        )
-        filesDone++
-        fileProgress[file.name] = 100
-        setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, filesDone, retryInfo: null }))
+      const uploadNext = async () => {
+        while (queue.length > 0) {
+          const file = queue.shift()
+          if (!file) break
+          await uploader(
+            job_id,
+            file,
+            (fraction) => {
+              fileProgress[file.name] = Math.round(fraction * 100)
+              setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, retryInfo: null }))
+            },
+            (retry) => {
+              setUploadState((s) => ({
+                ...s,
+                retryInfo: `${file.name}: retry ${retry.attempt}/${retry.max} (chunk ${retry.chunk}/${retry.totalChunks}) — waiting ${Math.round(retry.waitMs / 1000)}s`,
+              }))
+            }
+          )
+          filesDone++
+          fileProgress[file.name] = 100
+          setUploadState((s) => ({ ...s, fileProgress: { ...fileProgress }, filesDone, retryInfo: null }))
+        }
       }
+      const workers = Array.from({ length: Math.min(MAX_PARALLEL_FILES, files.length) }, () => uploadNext())
+      await Promise.all(workers)
 
       // Step 3: Start pipeline
       setUploadState((s) => ({ ...s, phase: 'starting' }))
